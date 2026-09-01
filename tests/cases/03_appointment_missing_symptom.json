@@ -1,0 +1,13 @@
+{
+  "case_id": "03_appointment_missing_symptom",
+  "description": "信息不全：intake 需要多轮追问",
+  "expected_intent": "book",
+  "expected_steps": ["router", "intake_question_loop"],
+  "user_messages": [
+    "我想挂个号",
+    "心内科"
+  ],
+  "expected_final_status": "intake_in_progress",
+  "expected_department": "心内科",
+  "hitl_required": false
+}

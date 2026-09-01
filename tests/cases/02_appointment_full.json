@@ -1,0 +1,14 @@
+{
+  "case_id": "02_appointment_full",
+  "description": "完整预约：用户表达症状 + 时间偏好",
+  "expected_intent": "book",
+  "expected_steps": ["router", "intake", "scheduler", "confirmer_hitl", "set_appointment"],
+  "user_messages": [
+    "我想挂号，最近老胃疼",
+    "持续一周了，挺难受的",
+    "消化科，明天上午最好"
+  ],
+  "expected_final_status": "confirmed",
+  "expected_department": "消化科",
+  "hitl_required": true
+}

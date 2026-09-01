@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual env
+.venv/
+venv/
+ENV/
+env/
+
+# Conda
+*.conda
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.cache
+coverage.xml
+*.cover
+
+# Project
+.env
+*.db
+*.db-journal
+data/*.sqlite
+data/*.sqlite-journal
+logs/
+*.log
+
+# LangGraph / LangSmith
+.langgraph_api/
+langgraph.json
+
+# References (调研参考，不进 git)
+references/
+
+# OS
+Thumbs.db

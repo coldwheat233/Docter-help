@@ -1,0 +1,12 @@
+{
+  "case_id": "04_reschedule",
+  "description": "改约：用户已有预约，要求换时间",
+  "expected_intent": "reschedule",
+  "expected_steps": ["router", "query_appointment", "scheduler", "confirmer_hitl", "update_schedule"],
+  "user_messages": [
+    "我想改个时间，明天上午的号改成后天",
+    "改成后天下午"
+  ],
+  "expected_final_status": "confirmed",
+  "hitl_required": true
+}
