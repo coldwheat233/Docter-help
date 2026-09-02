@@ -1,11 +1,12 @@
 {
   "case_id": "01_consultation",
   "description": "纯咨询场景：用户问症状，不预约",
-  "expected_intent": "consult",
-  "expected_steps": ["router", "answer_directly"],
+  "expected": {
+    "intent": "consult",
+    "final_status": "answered"
+  },
   "user_messages": [
     "高血压应该注意什么？"
   ],
-  "expected_final_status": "answered",
-  "hitl_required": false
+  "expected_steps": ["router", "knowledge"]
 }

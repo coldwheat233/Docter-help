@@ -1,0 +1,9 @@
+{
+  "case_id": "16_consultation_bp",
+  "description": "高血压日常护理咨询",
+  "expected": {
+    "intent": "consult"
+  },
+  "user_messages": ["高血压平时应该注意什么？"],
+  "expected_steps": ["router", "knowledge"]
+}

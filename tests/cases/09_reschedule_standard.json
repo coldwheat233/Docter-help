@@ -1,0 +1,9 @@
+{
+  "case_id": "09_reschedule_standard",
+  "description": "改约：标准场景",
+  "expected": {
+    "intent": "reschedule"
+  },
+  "user_messages": ["我想改个时间，预约单号A20240901ABCD，改到后天上午"],
+  "expected_steps": ["router", "scheduler", "confirmer"]
+}

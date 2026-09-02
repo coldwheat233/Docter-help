@@ -1,0 +1,12 @@
+{
+  "case_id": "20_reschedule_no_new_time",
+  "description": "改约：用户没说新时间",
+  "expected": {
+    "intent": "reschedule"
+  },
+  "user_messages": [
+    "我想改时间",
+    "原来的不太方便"
+  ],
+  "expected_steps": ["router", "scheduler", "confirmer"]
+}

@@ -1,0 +1,10 @@
+{
+  "case_id": "12_appointment_specific_doctor",
+  "description": "预约：指定医生",
+  "expected": {
+    "intent": "book",
+    "department": "心内科"
+  },
+  "user_messages": ["想挂张医生的号，心内科的", "明天下午"],
+  "expected_steps": ["router", "intake", "scheduler"]
+}

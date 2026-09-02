@@ -1,12 +1,14 @@
 {
   "case_id": "05_cancel",
   "description": "取消预约",
-  "expected_intent": "cancel",
-  "expected_steps": ["router", "query_appointment", "confirmer_hitl", "cancel_appointment"],
+  "expected": {
+    "intent": "cancel",
+    "final_status": "cancelled",
+    "hitl_required": true
+  },
   "user_messages": [
     "帮我取消明天的预约",
     "是的，确认取消"
   ],
-  "expected_final_status": "cancelled",
-  "hitl_required": true
+  "expected_steps": ["router", "confirmer"]
 }

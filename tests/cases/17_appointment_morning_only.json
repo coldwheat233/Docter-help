@@ -1,0 +1,13 @@
+{
+  "case_id": "17_appointment_morning_only",
+  "description": "预约：明确指定上午",
+  "expected": {
+    "intent": "book",
+    "department": "骨科"
+  },
+  "user_messages": [
+    "我想挂号，脚崴了想看骨科",
+    "只能上午"
+  ],
+  "expected_steps": ["router", "intake", "scheduler"]
+}

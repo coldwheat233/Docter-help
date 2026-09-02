@@ -116,8 +116,9 @@ def test_llm_primary_only_when_no_openai_key():
     from medical_agent.config import reload_settings
     from medical_agent.llm import get_llm
 
-    # 确保没设 OPENAI_API_KEY
+    # 确保没设 OPENAI_API_KEY，并禁用 MOCK（否则 get_llm 提前返回 mock）
     os.environ.pop("OPENAI_API_KEY", None)
+    os.environ["MOCK_LLM"] = "false"
     reload_settings()
 
     # Mock 掉 deepseek 真实调用
@@ -189,6 +190,11 @@ def test_chat_model_streaming_enabled():
     """ChatDeepSeek 默认 streaming=True。"""
     from medical_agent.llm import get_llm
     from unittest.mock import patch, MagicMock
+    import os
+
+    os.environ["MOCK_LLM"] = "false"  # 禁用 mock
+    from medical_agent.config import reload_settings
+    reload_settings()
 
     with patch("langchain_deepseek.ChatDeepSeek") as mock_ds:
         mock_instance = MagicMock()

@@ -1,0 +1,9 @@
+{
+  "case_id": "11_appointment_no_dept",
+  "description": "预约：用户没指定科室，期望反问",
+  "expected": {
+    "intent": "book"
+  },
+  "user_messages": ["我想挂号", "不太确定，就是胃不舒服"],
+  "expected_steps": ["router", "intake"]
+}

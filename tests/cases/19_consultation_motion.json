@@ -1,0 +1,9 @@
+{
+  "case_id": "19_consultation_motion",
+  "description": "运动损伤咨询",
+  "expected": {
+    "intent": "consult"
+  },
+  "user_messages": ["跑步时脚崴了怎么处理？"],
+  "expected_steps": ["router", "knowledge"]
+}

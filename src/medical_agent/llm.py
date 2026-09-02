@@ -40,6 +40,11 @@ def get_llm(
     """
     settings = get_settings()
     api_key = settings.deepseek_api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+
+    # Mock 模式（测试/CI 用）
+    if settings.mock_llm or os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes"):
+        return get_mock_llm()
+
     if not api_key:
         raise RuntimeError(
             "未设置 DEEPSEEK_API_KEY。\n"

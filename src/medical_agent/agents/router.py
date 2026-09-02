@@ -48,15 +48,16 @@ def classify_intent_stub(message: str) -> IntentType:
 
     关键词规则：
     - 包含"取消"/"退号"/"不去了" → cancel
-    - 包含"改"/"换"/"重新" → reschedule
-    - 包含"约"/"挂"/"想看"/"能不能" + 时间词 → book
+    - 包含"改"/"换"/"重新"（变约/改约类） → reschedule
+    - 包含"预约"/"挂号"/"想看"/"想约"/"想挂" → book
     - 否则 → consult
     """
     msg = message.lower()
     if any(kw in msg for kw in ["取消", "退号", "退诊", "不去了"]):
         return "cancel"
-    if any(kw in msg for kw in ["改约", "改个", "换个时间", "重新约", "改到"]):
+    # 改约关键词（不能与 cancel 重复）
+    if any(kw in msg for kw in ["改约", "改个", "改时间", "改到", "换个时间", "重新约", "改天"]):
         return "reschedule"
-    if any(kw in msg for kw in ["预约", "挂号", "挂个号", "想看", "想约"]):
+    if any(kw in msg for kw in ["预约", "挂号", "挂个号", "想看", "想约", "想挂", "挂个", "挂张"]):
         return "book"
     return "consult"

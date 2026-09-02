@@ -1,0 +1,9 @@
+{
+  "case_id": "14_consultation_no_appoint",
+  "description": "咨询：挂不上号怎么办",
+  "expected": {
+    "intent": "consult"
+  },
+  "user_messages": ["号都满了怎么办？"],
+  "expected_steps": ["router", "knowledge"]
+}

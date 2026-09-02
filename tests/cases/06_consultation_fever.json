@@ -1,0 +1,10 @@
+{
+  "case_id": "06_consultation_fever",
+  "description": "咨询：用户问感冒发烧怎么办",
+  "expected": {
+    "intent": "consult",
+    "final_status": "answered"
+  },
+  "user_messages": ["感冒发烧应该怎么办？"],
+  "expected_steps": ["router", "knowledge"]
+}

@@ -1,0 +1,9 @@
+{
+  "case_id": "13_consultation_skin",
+  "description": "皮肤科咨询",
+  "expected": {
+    "intent": "consult"
+  },
+  "user_messages": ["皮肤过敏起红疹怎么办？"],
+  "expected_steps": ["router", "knowledge"]
+}

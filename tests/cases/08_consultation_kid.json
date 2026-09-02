@@ -1,0 +1,10 @@
+{
+  "case_id": "08_consultation_kid",
+  "description": "儿科咨询：孩子咳嗽",
+  "expected": {
+    "intent": "consult",
+    "final_status": "answered"
+  },
+  "user_messages": ["我孩子咳嗽3天了，要不要去看医生？"],
+  "expected_steps": ["router", "knowledge"]
+}

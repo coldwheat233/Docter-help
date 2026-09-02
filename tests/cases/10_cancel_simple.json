@@ -1,0 +1,9 @@
+{
+  "case_id": "10_cancel_simple",
+  "description": "取消预约：简单场景",
+  "expected": {
+    "intent": "cancel"
+  },
+  "user_messages": ["帮我取消预约A20240901ABCD", "是的，确认取消"],
+  "expected_steps": ["router", "confirmer"]
+}

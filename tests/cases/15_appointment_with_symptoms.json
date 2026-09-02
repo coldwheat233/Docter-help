@@ -1,0 +1,13 @@
+{
+  "case_id": "15_appointment_with_symptoms",
+  "description": "预约：详细症状描述",
+  "expected": {
+    "intent": "book",
+    "department": "消化科"
+  },
+  "user_messages": [
+    "我想挂号，最近一周一直胃疼，吃完饭更严重，有时候反酸",
+    "想挂消化科"
+  ],
+  "expected_steps": ["router", "intake", "scheduler"]
+}

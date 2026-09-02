@@ -10,6 +10,9 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+# 固定 cases 目录为绝对路径
+CASES_DIR = PROJECT_ROOT / "tests" / "cases"
+
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_env():
@@ -20,6 +23,12 @@ def setup_env():
     os.environ.setdefault("DEEPSEEK_API_KEY", "test-key-for-testing")
     os.environ.setdefault("LANGSMITH_TRACING", "false")
     yield
+
+
+@pytest.fixture
+def cases_dir() -> Path:
+    """返回 cases 目录的绝对路径。"""
+    return CASES_DIR
 
 
 @pytest.fixture

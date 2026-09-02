@@ -1,0 +1,10 @@
+{
+  "case_id": "07_consultation_emergency",
+  "description": "急诊建议：用户问胸痛怎么办",
+  "expected": {
+    "intent": "consult",
+    "final_status": "answered"
+  },
+  "user_messages": ["突然胸痛是什么问题？需要去医院吗？"],
+  "expected_steps": ["router", "knowledge"]
+}

@@ -1,0 +1,9 @@
+{
+  "case_id": "18_cancel_with_reason",
+  "description": "取消预约：带原因",
+  "expected": {
+    "intent": "cancel"
+  },
+  "user_messages": ["取消A20240901EFGH预约，因为改期了", "确认取消"],
+  "expected_steps": ["router", "confirmer"]
+}
