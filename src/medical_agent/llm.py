@@ -5,6 +5,7 @@ v3 增强：
 - 备用 LLM：ChatOpenAI（如有 OPENAI_API_KEY）
 - 自动 fallback：主 LLM 失败/超时时切备用
 - 流式输出支持
+- 熔断器：连续失败 N 次自动 OPEN
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessageChunk, HumanMessage
 
 from medical_agent.config import get_settings
+from medical_agent.resilience import get_llm_circuit
 
 
 def get_llm(
@@ -81,6 +83,38 @@ def get_llm(
     return primary
 
 
+def invoke_with_protection(llm: BaseChatModel, messages, *, timeout_seconds: float = 30.0):
+    """带熔断 + 超时保护的 LLM 调用。
+
+    Args:
+        llm: LLM 实例
+        messages: 消息列表
+        timeout_seconds: 单次调用超时
+
+    Raises:
+        AppError: 熔断器 OPEN 或超时
+    """
+    circuit = get_llm_circuit()
+    return circuit.call(_invoke_sync, llm, messages, timeout=timeout_seconds)
+
+
+def _invoke_sync(llm, messages, *, timeout):
+    """实际调用（被熔断器包装）。"""
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(llm.invoke, messages)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError as e:
+            from medical_agent.resilience import AppError, ErrorCode
+            raise AppError(
+                ErrorCode.LLM_TIMEOUT,
+                f"LLM 调用超时（>{timeout}s）",
+                details={"timeout": timeout},
+            ) from e
+
+
 def _setup_langsmith_env() -> None:
     """设置 LangSmith 环境变量（如果启用）。"""
     settings = get_settings()
@@ -106,20 +140,13 @@ def get_mock_llm() -> BaseChatModel:
 # 流式输出辅助
 # =====================================================================
 def stream_llm_response(llm: BaseChatModel, prompt: str) -> Iterator[str]:
-    """流式调用 LLM（逐 token 返回）。
-
-    用法：
-        llm = get_llm()
-        for chunk in stream_llm_response(llm, "你好"):
-            print(chunk, end="", flush=True)
-    """
+    """流式调用 LLM（逐 token 返回）。"""
     for chunk in llm.stream([HumanMessage(content=prompt)]):
         if isinstance(chunk, AIMessageChunk):
             content = chunk.content
             if isinstance(content, str):
                 yield content
             elif isinstance(content, list):
-                # 部分模型返回 list[str]
                 for item in content:
                     if isinstance(item, str):
                         yield item
