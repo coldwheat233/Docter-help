@@ -1,15 +1,17 @@
 """Supervisor 图装配：4 个子 Agent + knowledge_agent + Supervisor 路由。
 
+v3 重构：外层 StateGraph + merge_state 节点
+- 解决 Supervisor sub-graph 不传业务字段（patient_id/selected_slot）的问题
+- 让 LLM 走完 4 轮后，set_appointment 工具能从 state 拿到参数
+
 参考实现：pareshraut/Langgraph-agents 的 src/doc-agent/graph.py
 API 文档：https://github.com/langchain-ai/langgraph-supervisor-py
-
-第 1 周：能编译、能 invoke（用 stub Agent 跑通）
-第 2 周：填充业务逻辑
 """
 
 from __future__ import annotations
 
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
 from langgraph_supervisor import create_supervisor
 
 from medical_agent.agents.confirmer import build_confirmer_agent, CONFIRMER_AGENT_NAME
@@ -48,16 +50,8 @@ SUPERVISOR_PROMPT = f"""你是医疗预约系统的调度中心（Supervisor）�
 """
 
 
-def build_supervisor_app(checkpointer: InMemorySaver | None = None):
-    """构造 Supervisor 应用。
-
-    Args:
-        checkpointer: 默认 InMemorySaver；测试时可换别的 saver
-
-    Returns:
-        编译后的 LangGraph 应用
-    """
-    # 1. 构造 4 个子 Agent + 1 知识 Agent
+def _build_inner_supervisor():
+    """构造内层 Supervisor（不包装 state）。"""
     agents = [
         build_router_agent(),
         build_intake_agent(),
@@ -66,19 +60,67 @@ def build_supervisor_app(checkpointer: InMemorySaver | None = None):
         build_knowledge_agent(),
     ]
 
-    # 2. 装配 Supervisor
     workflow = create_supervisor(
         agents=agents,
         model=get_llm(),
         prompt=SUPERVISOR_PROMPT,
-        output_mode="last_message",  # 子 Agent 只回最后一条，省 token
-        add_handoff_messages=True,   # 自动插入转交消息
+        output_mode="last_message",
+        add_handoff_messages=True,
         supervisor_name=SUPERVISOR_NAME,
     )
+    return workflow
 
-    # 3. 编译（必须配 checkpointer，因为 HITL interrupt 需要）
-    app = workflow.compile(checkpointer=checkpointer or InMemorySaver())
-    return app
+
+def merge_state_node(state: AppointmentState) -> dict:
+    """merge_state 节点：把外部传入的业务字段提取/规范化。
+
+    解决 Supervisor sub-graph 看不到外部 patient_id/selected_slot 的问题：
+    - 外部 state 字段会被透传到 Supervisor 内部
+    - Supervisor 内部 state 包含这些字段后，子 Agent 的工具能从 runtime 拿到
+    """
+    return {
+        "patient_id": state.get("patient_id", ""),
+        "selected_slot": state.get("selected_slot"),
+        "symptoms": state.get("symptoms", ""),
+        "duration": state.get("duration", ""),
+        "severity": state.get("severity", ""),
+        "preferred_date": state.get("preferred_date", ""),
+        "preferred_time_slot": state.get("preferred_time_slot", ""),
+        "intent": state.get("intent", ""),
+        "current_step": state.get("current_step", "init"),
+    }
+
+
+def build_supervisor_app(checkpointer: InMemorySaver | None = None):
+    """构造 Supervisor 应用（v3 wrapper 版）。
+
+    架构：
+        START → merge_state → inner_supervisor → END
+
+    Args:
+        checkpointer: 默认 InMemorySaver
+
+    Returns:
+        编译后的 LangGraph 应用（wrapper）
+    """
+    inner_workflow = _build_inner_supervisor()
+
+    # 外层 wrapper
+    wrapper = StateGraph(AppointmentState)
+
+    # 1) merge_state 节点
+    wrapper.add_node("merge_state", merge_state_node)
+
+    # 2) inner supervisor 作为节点
+    # 注意：内层 supervisor 是 CompiledStateGraph，LangGraph 0.3+ 支持作为节点
+    wrapper.add_node("supervisor", inner_workflow.compile())
+
+    # 3) edges
+    wrapper.add_edge(START, "merge_state")
+    wrapper.add_edge("merge_state", "supervisor")
+    wrapper.add_edge("supervisor", END)
+
+    return wrapper.compile(checkpointer=checkpointer or InMemorySaver())
 
 
 def run_demo_query(query: str, thread_id: str = "demo-thread-001") -> dict:
@@ -93,8 +135,8 @@ def run_demo_query(query: str, thread_id: str = "demo-thread-001") -> dict:
 
 
 if __name__ == "__main__":
-    print("Supervisor 图已构造完毕。")
+    print("Supervisor 图已构造完毕（v3 wrapper 版）。")
     print(f"  子 Agent: {[ROUTER_AGENT_NAME, INTAKE_AGENT_NAME, SCHEDULER_AGENT_NAME, CONFIRMER_AGENT_NAME, KNOWLEDGE_AGENT_NAME]}")
     print(f"  Supervisor: {SUPERVISOR_NAME}")
     print()
-    print("用法：python demos/03_medical_appointment_demo.py")
+    print("用法：python demos/07_llm_real_appointment.py")

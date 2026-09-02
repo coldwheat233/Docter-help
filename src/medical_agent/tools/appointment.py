@@ -1,6 +1,7 @@
 """预约相关工具（写操作，落库前必须 HITL + 乐观锁 + 幂等性）。
 
-v2 增强：
+v3 增强：
+- set_appointment 从 state 自动拿参数（LLM 调 set_appointment() 即可）
 - 落库前 re-check（防排班已变）
 - idempotency_key 防 Agent 重入
 - 错误码标准化（便于 Agent 解释给用户）
@@ -11,6 +12,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime
+from typing import Any
 
 from langchain_core.tools import tool
 
@@ -38,6 +40,16 @@ def _success_response(data: dict) -> str:
     return json.dumps({"success": True, **data}, ensure_ascii=False)
 
 
+def _get_state_from_runtime(runtime) -> dict:
+    """从 LangGraph runtime 拿 state。"""
+    if runtime is None:
+        return {}
+    try:
+        return runtime.state or {}
+    except Exception:
+        return {}
+
+
 def _recheck_schedule(schedule_id: int) -> dict:
     """落库前 re-check：再查一次排班（防排班已变）。"""
     from medical_agent.db.database import get_db
@@ -62,34 +74,63 @@ def _recheck_schedule(schedule_id: int) -> dict:
 # =====================================================================
 @tool
 def set_appointment(
-    patient_id: str,
-    doctor_id: int,
-    schedule_id: int,
-    expected_schedule_version: int,
+    patient_id: str = "",
+    doctor_id: int = 0,
+    schedule_id: int = 0,
+    expected_schedule_version: int = 0,
     idempotency_key: str = "",
     symptoms: str = "",
     duration: str = "",
     severity: str = "",
+    runtime: Any = None,
 ) -> str:
-    """创建预约（落库）。v2：带乐观锁 + 幂等性 + re-check。
+    """创建预约（落库）。自动从 state 提取 patient_id/doctor_id/schedule_id。
 
     ⚠️ 这是写操作，必须经过 HITL 人工确认后才能调用！
 
-    Args:
-        patient_id: 患者 ID
-        doctor_id: 医生 ID
-        schedule_id: 排班 ID
-        expected_schedule_version: 期望的排班版本号（v2 必须传；与 check_availability 返回的 schedule_version 配合）
-        idempotency_key: 幂等键（v2 推荐；Agent 重入保护）
-        symptoms: 主诉
-        duration: 病程
-        severity: 严重程度
+    调用方式：
+    - LLM 调：set_appointment() 即可（自动从 state 拿参数）
+    - 显式调：set_appointment(patient_id="P001", doctor_id=1, schedule_id=51, ...)
+
+    自动从 state 提取：
+    - patient_id: state["patient_id"]
+    - doctor_id:  state["selected_slot"]["doctor_id"]
+    - schedule_id: state["selected_slot"]["schedule_id"]
+    - expected_schedule_version: state["selected_slot"]["schedule_version"]
+    - symptoms/duration/severity: state["symptoms"]/["duration"]/["severity"]
 
     Returns:
         JSON 字符串。成功：{"success": true, "appointment_id": ...}
                        失败：{"success": false, "error_code": "OPTIMISTIC_LOCK", ...}
     """
-    # 1. 落库前 re-check（防 HITL 审批中排班变了）
+    # 1. 从 runtime 拿 state（覆盖默认参数）
+    state = _get_state_from_runtime(runtime)
+    if not patient_id:
+        patient_id = state.get("patient_id", "")
+    if not schedule_id:
+        schedule_id = state.get("selected_slot", {}).get("schedule_id", 0) if state.get("selected_slot") else 0
+    if not doctor_id:
+        doctor_id = state.get("selected_slot", {}).get("doctor_id", 0) if state.get("selected_slot") else 0
+    if not expected_schedule_version:
+        expected_schedule_version = (
+            state.get("selected_slot", {}).get("schedule_version", 0) if state.get("selected_slot") else 0
+        )
+    if not symptoms:
+        symptoms = state.get("symptoms", "")
+    if not duration:
+        duration = state.get("duration", "")
+    if not severity:
+        severity = state.get("severity", "")
+
+    # 2. 校验必填
+    if not patient_id or not schedule_id or not doctor_id:
+        return _error_response(
+            "MISSING_PARAMS",
+            f"必填参数缺失：patient_id={patient_id}, doctor_id={doctor_id}, schedule_id={schedule_id}",
+            hint="LLM 调 set_appointment() 时应从 state 提取；或显式传参",
+        )
+
+    # 3. 落库前 re-check（防 HITL 审批中排班变了）
     recheck = _recheck_schedule(schedule_id)
     if not recheck["available"]:
         return _error_response(
@@ -98,23 +139,21 @@ def set_appointment(
             reason=recheck["reason"],
         )
 
-    # 2. 检查上游是否有未应用的变更（如果有时强制 re-fetch）
+    # 4. 检查上游是否有未应用的变更
     from medical_agent.db.database import get_db
 
     db = get_db()
     upstream = UpstreamChangeRepository(db)
     if upstream.has_pending_change("schedule", str(schedule_id)):
-        # 有未处理的变更，强制 Agent 重新查
         return _error_response(
             "UPSTREAM_CHANGED",
             f"排班 {schedule_id} 有上游变更未应用，请重新调用 check_availability",
-            pending_changes=upstream.list_pending_for_entity("schedule", str(schedule_id)),
         )
 
-    # 3. 生成 idempotency_key（如果调用方没传）
+    # 5. 生成 idempotency_key
     effective_key = idempotency_key or f"appt-{uuid.uuid4().hex}"
 
-    # 4. 调 Repository（事务 + 乐观锁 + 幂等性都在里面）
+    # 6. 调 Repository
     try:
         appointment_id = AppointmentRepository(db).create(
             patient_id=patient_id,
@@ -129,7 +168,7 @@ def set_appointment(
     except OptimisticLockError as e:
         return _error_response("OPTIMISTIC_LOCK", str(e))
 
-    # 5. 通知下游（mock：打印日志）
+    # 7. 通知下游
     from medical_agent.downstream.notifier import notify_appointment_created
     notify_appointment_created(appointment_id)
 
