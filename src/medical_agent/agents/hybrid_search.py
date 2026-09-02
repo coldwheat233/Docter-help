@@ -195,16 +195,18 @@ def _keyword_score(query: str, kb: dict) -> float:
 def hybrid_search(
     query: str,
     top_k: int = 5,
-    bm25_weight: float = 0.6,
-    keyword_weight: float = 0.4,
+    bm25_weight: float = 0.3,
+    keyword_weight: float = 0.2,
+    dense_weight: float = 0.5,
 ) -> list[dict]:
-    """BM25 + 关键词融合检索。
+    """BM25 + 关键词 + Dense 3 路融合检索。
 
     算法：
-    1. BM25 召回 top_k * 2 个候选
-    2. 关键词匹配召回 top_k * 2 个候选
-    3. 融合打分：score = bm25_weight * bm25_norm + keyword_weight * kw_norm
-    4. 取 top_k
+    1. BM25 召回 top_k * 2 候选
+    2. 关键词匹配召回 top_k * 2 候选
+    3. Dense 向量召回 top_k * 2 候选
+    4. 融合打分：score = bm25_weight * bm25_norm + keyword_weight * kw_norm + dense_weight * dense_norm
+    5. 取 top_k
 
     归一化：每路分数除以该路最大分数（max-norm），归一到 [0, 1]
     """
@@ -214,10 +216,7 @@ def hybrid_search(
 
     # 1. BM25 候选
     bm25_candidates = bm25_index.rank(query, top_k=top_k * 2)
-    if bm25_candidates:
-        max_bm25 = max(s for _, s in bm25_candidates) or 1.0
-    else:
-        max_bm25 = 1.0
+    max_bm25 = max((s for _, s in bm25_candidates), default=1.0) or 1.0
     bm25_scores: dict[int, float] = {
         idx: s / max_bm25 for idx, s in bm25_candidates
     }
@@ -230,28 +229,55 @@ def hybrid_search(
             kw_scores_raw.append((i, s))
     kw_scores_raw.sort(key=lambda x: x[1], reverse=True)
     kw_candidates = kw_scores_raw[: top_k * 2]
-    if kw_candidates:
-        max_kw = max(s for _, s in kw_candidates) or 1.0
-    else:
-        max_kw = 1.0
+    max_kw = max((s for _, s in kw_candidates), default=1.0) or 1.0
     kw_scores: dict[int, float] = {
         idx: s / max_kw for idx, s in kw_candidates
     }
 
-    # 3. 融合
-    all_indices = set(bm25_scores.keys()) | set(kw_scores.keys())
+    # 3. Dense 候选（懒加载）
+    dense_scores: dict[int, float] = {}
+    try:
+        from medical_agent.agents.dense_search import dense_search
+
+        dense_results = dense_search(query, top_k=top_k * 2)
+        # dense_search 返回 [{id, topic, ..., score}, ...]
+        # 需要映射回 doc_idx
+        for r in dense_results:
+            doc_id = r.get("id")
+            for i, doc in enumerate(documents):
+                if doc["kb"]["id"] == doc_id:
+                    dense_scores[i] = float(r["score"])
+                    break
+    except Exception as e:
+        # dense 失败时退化为 2 路
+        print(f"[hybrid_search] dense 失败：{e}")
+        dense_weight = 0.0
+
+    # 4. 融合
+    all_indices = (
+        set(bm25_scores.keys()) | set(kw_scores.keys()) | set(dense_scores.keys())
+    )
     fused: list[tuple[int, float]] = []
     for idx in all_indices:
         b = bm25_scores.get(idx, 0.0)
         k = kw_scores.get(idx, 0.0)
-        score = bm25_weight * b + keyword_weight * k
+        d = dense_scores.get(idx, 0.0)
+        # 归一化权重（防止 dense 失败时总权重 < 1）
+        total_weight = bm25_weight + keyword_weight + dense_weight
+        score = (bm25_weight * b + keyword_weight * k + dense_weight * d) / total_weight
         if score > 0:
             fused.append((idx, score))
 
-    # 4. 排序取 top_k
+    # 5. 排序取 top_k
     fused.sort(key=lambda x: x[1], reverse=True)
     return [
-        {**documents[idx]["kb"], "score": score, "bm25": bm25_scores.get(idx, 0), "kw": kw_scores.get(idx, 0)}
+        {
+            **documents[idx]["kb"],
+            "score": score,
+            "bm25": bm25_scores.get(idx, 0),
+            "kw": kw_scores.get(idx, 0),
+            "dense": dense_scores.get(idx, 0),
+        }
         for idx, score in fused[:top_k]
     ]
 
