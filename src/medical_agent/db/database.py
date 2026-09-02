@@ -20,9 +20,10 @@ def get_db() -> sqlite3.Connection:
         settings = get_settings()
         db_path = Path(settings.db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        # 注意：不启用 PARSE_DECLTYPES，避免 timestamp 自动转 datetime
+        # 否则 langgraph checkpoint 序列化时会报 "Object of type datetime is not JSON serializable"
         _connection = sqlite3.connect(
             str(db_path),
-            detect_types=sqlite3.PARSE_DECLTYPES,
             check_same_thread=False,  # LangGraph 多线程调用
         )
         _connection.row_factory = sqlite3.Row
