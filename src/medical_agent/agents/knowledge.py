@@ -607,25 +607,23 @@ def build_knowledge_agent() -> "CompiledStateGraph":  # noqa: F821
 
 
 def search_knowledge(query: str) -> list[dict]:
-    """简单关键词匹配（替代向量检索的 stub）。
+    """v2 融合检索：BM25 + 关键词匹配 → 加权融合。
 
-    第 2 周会改为 SQLite FTS5 + 向量检索。
+    保留函数名 search_knowledge 以兼容旧调用。
+    实际使用 hybrid_search 实现。
     """
-    query_lower = query.lower()
-    results = []
-    for kb in KNOWLEDGE_BASE:
-        score = 0
-        # 关键词命中
-        for kw in kb["keywords"]:
-            if kw.lower() in query_lower:
-                score += 1
-        # topic 命中
-        if kb["topic"].lower() in query_lower:
-            score += 2
-        # 部门命中
-        if kb.get("department") and kb["department"].lower() in query_lower:
-            score += 1
-        if score > 0:
-            results.append({**kb, "score": score})
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results
+    from medical_agent.agents.hybrid_search import hybrid_search
+
+    results = hybrid_search(query, top_k=5)
+    # 简化返回格式（保持 v1 兼容）
+    return [
+        {
+            "id": r["id"],
+            "topic": r["topic"],
+            "keywords": r["keywords"],
+            "department": r.get("department", ""),
+            "content": r["content"],
+            "score": r["score"],
+        }
+        for r in results
+    ]
