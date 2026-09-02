@@ -1,4 +1,4 @@
-"""Supervisor 图装配：4 个子 Agent + Supervisor 路由。
+"""Supervisor 图装配：4 个子 Agent + knowledge_agent + Supervisor 路由。
 
 参考实现：pareshraut/Langgraph-agents 的 src/doc-agent/graph.py
 API 文档：https://github.com/langchain-ai/langgraph-supervisor-py
@@ -14,6 +14,7 @@ from langgraph_supervisor import create_supervisor
 
 from medical_agent.agents.confirmer import build_confirmer_agent, CONFIRMER_AGENT_NAME
 from medical_agent.agents.intake import build_intake_agent, INTAKE_AGENT_NAME
+from medical_agent.agents.knowledge import build_knowledge_agent, KNOWLEDGE_AGENT_NAME
 from medical_agent.agents.router import build_router_agent, ROUTER_AGENT_NAME
 from medical_agent.agents.scheduler import build_scheduler_agent, SCHEDULER_AGENT_NAME
 from medical_agent.llm import get_llm
@@ -30,13 +31,15 @@ SUPERVISOR_PROMPT = f"""你是医疗预约系统的调度中心（Supervisor）�
 - {INTAKE_AGENT_NAME}：问诊信息收集（症状、病程、严重程度、科室）
 - {SCHEDULER_AGENT_NAME}：时间推荐（根据排班表匹配可用时段）
 - {CONFIRMER_AGENT_NAME}：预约确认（落库前人工审核）
+- {KNOWLEDGE_AGENT_NAME}：医学知识问答（症状护理、急诊指引、科室建议）
 
 路由规则（按顺序判断）：
-1. 用户首条消息 / 意图不明 → {ROUTER_AGENT_NAME}
-2. 已识别为"预约"且信息未全 → {INTAKE_AGENT_NAME}
-3. 信息已全，需要看时间 → {SCHEDULER_AGENT_NAME}
-4. 用户已选定时段 → {CONFIRMER_AGENT_NAME}
-5. 用户问咨询类问题 → 直接回答，不路由
+1. 用户问症状/护理/急诊/非挂号类问题 → {KNOWLEDGE_AGENT_NAME}
+2. 用户首条消息 / 意图不明 → {ROUTER_AGENT_NAME}
+3. 已识别为"预约"且信息未全 → {INTAKE_AGENT_NAME}
+4. 信息已全，需要看时间 → {SCHEDULER_AGENT_NAME}
+5. 用户已选定时段 → {CONFIRMER_AGENT_NAME}
+6. 用户问咨询类问题 → {KNOWLEDGE_AGENT_NAME}（如未走通上面）
 
 约束：
 - 任何"写操作"（创建/取消/改约）必须经过 {CONFIRMER_AGENT_NAME} 的人工确认
@@ -54,12 +57,13 @@ def build_supervisor_app(checkpointer: InMemorySaver | None = None):
     Returns:
         编译后的 LangGraph 应用
     """
-    # 1. 构造 4 个子 Agent
+    # 1. 构造 4 个子 Agent + 1 知识 Agent
     agents = [
         build_router_agent(),
         build_intake_agent(),
         build_scheduler_agent(),
         build_confirmer_agent(),
+        build_knowledge_agent(),
     ]
 
     # 2. 装配 Supervisor
@@ -90,7 +94,7 @@ def run_demo_query(query: str, thread_id: str = "demo-thread-001") -> dict:
 
 if __name__ == "__main__":
     print("Supervisor 图已构造完毕。")
-    print(f"  子 Agent: {[ROUTER_AGENT_NAME, INTAKE_AGENT_NAME, SCHEDULER_AGENT_NAME, CONFIRMER_AGENT_NAME]}")
+    print(f"  子 Agent: {[ROUTER_AGENT_NAME, INTAKE_AGENT_NAME, SCHEDULER_AGENT_NAME, CONFIRMER_AGENT_NAME, KNOWLEDGE_AGENT_NAME]}")
     print(f"  Supervisor: {SUPERVISOR_NAME}")
     print()
     print("用法：python demos/03_medical_appointment_demo.py")
