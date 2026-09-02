@@ -1,7 +1,9 @@
 """路由 Agent：识别用户意图（咨询 / 预约 / 改约 / 取消）。
 
-第 1 周：stub（能 import、name 唯一、可被 Supervisor 装配）
-第 2 周：实现 LLM 分类 + 状态写入
+v2 增强：
+- 接 LLM 分类（结构化输出 JSON）
+- fallback 规则分类（classify_intent_stub）当 LLM 不可用
+- 工具预留：query_appointments（查已有预约）
 """
 
 from __future__ import annotations
@@ -17,30 +19,34 @@ ROUTER_AGENT_NAME = "router_agent"
 
 
 ROUTER_PROMPT = """你是一个医疗预约系统的路由员。
-根据用户的最新消息，识别其意图属于以下 4 类之一：
+你的任务：根据用户的最新消息，识别其意图属于以下 4 类之一：
 - consult：仅咨询（问症状、问科室、不想预约）
 - book：新建预约
 - reschedule：改约已有预约
 - cancel：取消已有预约
 
-只输出意图分类，不要做其他回复。
+**输出格式**：必须以 JSON 格式回复，便于系统解析：
+```json
+{"intent": "book|reschedule|cancel|consult", "confidence": 0.0-1.0, "reason": "简短原因"}
+```
+
+不要输出其他内容。如果用户意图不明，输出 consult + 低 confidence。
 """
 
 
 def build_router_agent() -> "CompiledStateGraph":  # noqa: F821
-    """构造路由 Agent（stub）。
+    """构造路由 Agent。
 
-    第 2 周替换为：
-    - prompt 改为结构化输出（强制返回 JSON）
-    - 写入 state['intent']
+    v2: 注入查询工具（占位）。prompt 强制 JSON 输出。
     """
-    agent = create_react_agent(
+    from medical_agent.tools.scheduling import list_departments
+
+    return create_react_agent(
         model=get_llm(),
-        tools=[],  # 第 2 周填入：query_appointments（查已有预约，用于 cancel/reschedule）
+        tools=[],  # 暂不注入 list_departments，避免循环依赖；如需科室列表可加
         name=ROUTER_AGENT_NAME,
         prompt=ROUTER_PROMPT,
     )
-    return agent
 
 
 def classify_intent_stub(message: str) -> IntentType:
@@ -61,3 +67,27 @@ def classify_intent_stub(message: str) -> IntentType:
     if any(kw in msg for kw in ["预约", "挂号", "挂个号", "想看", "想约", "想挂", "挂个", "挂张"]):
         return "book"
     return "consult"
+
+
+def parse_intent_from_text(text: str) -> IntentType | None:
+    """从 LLM 输出解析 intent（JSON 或纯文本）。"""
+    import json
+    import re
+
+    if not text:
+        return None
+
+    # 尝试解析 JSON
+    try:
+        # 找 JSON 块
+        match = re.search(r"\{[^{}]*\"intent\"[^{}]*\}", text)
+        if match:
+            data = json.loads(match.group(0))
+            intent = data.get("intent", "").lower().strip()
+            if intent in ("consult", "book", "reschedule", "cancel"):
+                return intent  # type: ignore
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
+    # Fallback: 关键词匹配
+    return classify_intent_stub(text)
