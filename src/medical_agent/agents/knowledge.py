@@ -598,9 +598,11 @@ KNOWLEDGE_PROMPT = """你是医疗预约系统的知识问答助手。
 
 def build_knowledge_agent() -> "CompiledStateGraph":  # noqa: F821
     """构造知识问答 Agent。"""
+    from medical_agent.tools.rag_tool import search_medical_knowledge
+
     return create_react_agent(
         model=get_llm(),
-        tools=[],  # 未来加 search_knowledge
+        tools=[search_medical_knowledge],  # v3: 注入 RAG 工具
         name=KNOWLEDGE_AGENT_NAME,
         prompt=KNOWLEDGE_PROMPT,
     )
