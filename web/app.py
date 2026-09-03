@@ -391,6 +391,39 @@ def send_message(user_input: str) -> None:
         st.session_state.messages.append({"role": "assistant", "content": emergency_msg})
         return
 
+    # 2.5 限流检查（v3 新增：抗滥用 / 抗雪崩）
+    from medical_agent.rate_limit import check_rate_limit
+
+    patient_id = st.session_state.get("patient_id", "anonymous")
+    allowed, limit_info = check_rate_limit(patient_id)
+    if not allowed:
+        retry_after = limit_info.get("retry_after", 60)
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(user_input)
+        block_msg = (
+            f"⏳ 系统繁忙，请稍后再试（{retry_after} 秒后）\n\n"
+            f"短时间内问太多会触发保护。\n"
+            f"如需紧急帮助请拨打 120。"
+        )
+        with st.chat_message("assistant", avatar="⏳"):
+            st.warning(block_msg)
+        st.session_state.messages.append({"role": "assistant", "content": block_msg})
+        return
+
+    # 2.6 响应缓存检查（v3 新增：同问同答秒回）
+    from medical_agent.cache import cached_response, cache_response
+
+    cached = cached_response(user_input)
+    if cached is not None:
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(user_input)
+        with st.chat_message("assistant", avatar="⚡"):
+            st.markdown(cached + "\n\n*（来自缓存，毫秒级响应）*")
+        st.session_state.messages.append({"role": "assistant", "content": cached})
+        return
+
     # 3. 追加用户消息
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user", avatar="👤"):
@@ -407,6 +440,10 @@ def send_message(user_input: str) -> None:
             error_msg = f"❌ 出错：{e}"
             st.error(error_msg)
             full_response = error_msg
+
+    # 5.5 缓存响应（v3 新增：同问同答秒回）
+    if full_response and not full_response.startswith("❌"):
+        cache_response(user_input, full_response)
 
     # 6. 输出护栏
     if enable_guardrails and full_response:
