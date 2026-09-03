@@ -109,7 +109,7 @@ def build_supervisor_app(checkpointer: InMemorySaver | None = None):
         START → merge_state → inner_supervisor → END
 
     Args:
-        checkpointer: 默认 InMemorySaver
+        checkpointer: 默认从配置自动选（Memory/Sqlite/Postgres）
 
     Returns:
         编译后的 LangGraph 应用（wrapper）
@@ -131,7 +131,12 @@ def build_supervisor_app(checkpointer: InMemorySaver | None = None):
     wrapper.add_edge("merge_state", "supervisor")
     wrapper.add_edge("supervisor", END)
 
-    return wrapper.compile(checkpointer=checkpointer or InMemorySaver())
+    # 4) checkpointer：v3 从配置自动选
+    if checkpointer is None:
+        from medical_agent.checkpoint import get_checkpointer
+        checkpointer = get_checkpointer()
+
+    return wrapper.compile(checkpointer=checkpointer)
 
 
 def run_demo_query(query: str, thread_id: str = "demo-thread-001") -> dict:
