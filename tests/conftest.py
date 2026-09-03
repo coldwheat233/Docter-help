@@ -13,6 +13,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 # 固定 cases 目录为绝对路径
 CASES_DIR = PROJECT_ROOT / "tests" / "cases"
 
+# HF 模型离线（避免 SSL 验证失败）
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_env():
@@ -22,6 +27,8 @@ def setup_env():
     os.environ.setdefault("DB_PATH", str(PROJECT_ROOT / "data" / "test_medical.db"))
     os.environ.setdefault("DEEPSEEK_API_KEY", "test-key-for-testing")
     os.environ.setdefault("LANGSMITH_TRACING", "false")
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     yield
 
 

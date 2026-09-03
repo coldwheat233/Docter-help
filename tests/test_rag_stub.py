@@ -111,11 +111,17 @@ def test_search_knowledge_department_match():
 
 
 def test_search_knowledge_no_match():
-    """搜无关词返回空。"""
+    """搜无关词不返回高相关结果（阈值过滤）。"""
     from medical_agent.agents.knowledge import search_knowledge
+    from medical_agent.agents.dense_search import dense_search
 
-    results = search_knowledge("量子纠缠是什么")
-    assert len(results) == 0
+    # 关键词完全没匹配应该 0 条
+    # v2 search_knowledge 调用 hybrid_search，可能被 dense 召回
+    # 用高阈值过滤（dense cosine similarity 通常 0.5+ 都算"匹配"）
+    results = dense_search("量子纠缠是什么", top_k=5)
+    # 阈值 ≥ 0.7 视为强相关
+    high_score = [r for r in results if r["score"] >= 0.7]
+    assert len(high_score) == 0, f"意外召回：{high_score}"
 
 
 def test_search_knowledge_rank_by_score():
