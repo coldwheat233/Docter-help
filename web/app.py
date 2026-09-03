@@ -85,13 +85,29 @@ if DEV_MODE:
         enable_guardrails = st.checkbox("启用输入护栏", value=True)
 
         st.divider()
+        st.markdown("**🧑 模拟登录态（patient_id）**")
+        patient_options = {
+            "P20240001 张三 (13800000001)": "P20240001",
+            "P20240002 李四 (13800000002)": "P20240002",
+            "P20240003 王五 (13800000003)": "P20240003",
+        }
+        selected_patient = st.selectbox(
+            "当前患者",
+            options=list(patient_options.keys()),
+            index=0,
+            help="生产环境应从登录态/微信/支付宝/手机验证获取，不在对话中问",
+        )
+        st.session_state.patient_id = patient_options[selected_patient]
+
+        st.divider()
         st.markdown("**📊 项目状态**")
         settings = get_settings()
         st.code(
             f"DB: {settings.db_path.name}\n"
             f"Mock: {settings.mock_llm}\n"
             f"LangSmith: {settings.langsmith_tracing}\n"
-            f"Model: {settings.deepseek_model}",
+            f"Model: {settings.deepseek_model}\n"
+            f"Patient: {st.session_state.get('patient_id', 'N/A')}",
             language="text",
         )
 
@@ -115,9 +131,11 @@ if DEV_MODE:
             if st.button(f"⚠ {q[:15]}...", key=f"g_{q}", use_container_width=True):
                 st.session_state.pending_input = q
 else:
-    # 患者模式：固定配置
+    # 患者模式：固定配置 + 默认患者（生产应从登录态取）
     mode = "supervisor"
     enable_guardrails = True
+    if "patient_id" not in st.session_state:
+        st.session_state.patient_id = "P20240001"  # 模拟已登录
     if st.button("🔄 清空对话", key="patient_clear"):
         st.session_state.messages = []
         st.session_state.thread_id = f"web-patient-{id(st.session_state)}"
@@ -220,8 +238,14 @@ def stream_agent_response(user_input: str):
 
     try:
         # 流式获取
+        # v3: 注入 patient_id（从登录态），不让 LLM 在对话中问
+        patient_id = st.session_state.get("patient_id", "P20240001")
+        initial_state = {
+            "messages": [HumanMessage(content=user_input)],
+            "patient_id": patient_id,
+        }
         for chunk in app.stream(
-            {"messages": [HumanMessage(content=user_input)]},
+            initial_state,
             config=config,
             stream_mode="messages",
         ):
@@ -230,18 +254,19 @@ def stream_agent_response(user_input: str):
             else:
                 msg_obj = chunk
 
-            # 检测 ToolMessage
-            if msg_obj.__class__.__name__ == "ToolMessage":
-                tool_content = msg_obj.content if hasattr(msg_obj, "content") else str(msg_obj)
-                # 解析 JSON
-                try:
-                    parsed = json.loads(tool_content)
-                    if isinstance(parsed, dict) and "success" in parsed:
-                        last_tool_result = parsed
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            # v3 修复：彻底过滤 ToolMessage（不向用户展示）
+            # - "Successfully transferred to xxx" 是 langgraph-supervisor 的 handoff 调试消息
+            # - 业务工具结果由 confirmer_agent 自己转成自然语言回复
+            msg_class = msg_obj.__class__.__name__
+            if msg_class == "ToolMessage":
+                # 静默吞掉 ToolMessage，不 yield
+                continue
 
-            # 提取文本
+            # 只取 HumanMessage 和 AIMessage
+            if msg_class == "HumanMessage":
+                continue  # 不重复显示用户输入
+
+            # AIMessage：提取文本
             content = ""
             if hasattr(msg_obj, "content"):
                 content = msg_obj.content
@@ -264,7 +289,10 @@ def stream_agent_response(user_input: str):
         # Fallback（mock LLM 不会流）
         if not accumulated_text:
             result = app.invoke(
-                {"messages": [HumanMessage(content=user_input)]},
+                {
+                    "messages": [HumanMessage(content=user_input)],
+                    "patient_id": st.session_state.get("patient_id", "P20240001"),
+                },
                 config=config,
             )
             last = result["messages"][-1]
