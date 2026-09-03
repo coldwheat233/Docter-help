@@ -141,6 +141,80 @@ else:
         st.session_state.thread_id = f"web-patient-{id(st.session_state)}"
         st.rerun()
 
+    # v3 新增：我的预约面板（患者视图核心）
+    with st.expander("📅 我的预约", expanded=False):
+        from medical_agent.tools.appointment_query import query_my_appointments
+
+        class _FakeRuntime:
+            state = {"patient_id": st.session_state.get("patient_id", "P20240001")}
+
+        result = query_my_appointments.func(runtime=_FakeRuntime(), limit=10)
+        import json as _json
+
+        try:
+            data = _json.loads(result)
+        except Exception:
+            data = {"success": False, "appointments": []}
+
+        if not data.get("success"):
+            st.warning(data.get("error_message", "无法加载"))
+        else:
+            appts = data.get("appointments", [])
+            if not appts:
+                st.info("您还没有预约记录")
+                st.caption("试试说"我想挂号"开始预约")
+            else:
+                for a in appts:
+                    status_emoji = {
+                        "confirmed": "✅",
+                        "pending": "⏳",
+                        "cancelled": "❌",
+                        "completed": "🏥",
+                        "no_show": "👻",
+                    }.get(a.get("status", ""), "❓")
+                    with st.container():
+                        st.markdown(
+                            f"**{status_emoji} {a.get('appointment_id', '')}**\n\n"
+                            f"状态：{a.get('status', '')} | "
+                            f"症状：{a.get('symptoms', '')[:30]}..."
+                        )
+                        # 详情按钮
+                        if st.button(
+                            "📋 详情",
+                            key=f"detail_{a.get('appointment_id', '')}",
+                        ):
+                            st.session_state.selected_appt = a.get("appointment_id")
+                            st.rerun()
+
+        # 详情展示
+        if hasattr(st.session_state, "selected_appt") and st.session_state.selected_appt:
+            from medical_agent.tools.appointment_query import get_appointment_detail
+
+            with st.spinner("加载详情..."):
+                d = get_appointment_detail.func(
+                    appointment_id=st.session_state.selected_appt,
+                    runtime=_FakeRuntime(),
+                )
+            d_data = _json.loads(d)
+            if d_data.get("success"):
+                appt = d_data["appointment"]
+                doc = d_data.get("doctor") or {}
+                sched = d_data.get("schedule") or {}
+                st.markdown("---")
+                st.markdown(f"### 📋 预约 {appt.get('id', '')}")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("状态", appt.get("status", ""))
+                    st.metric("医生", f"{doc.get('name', '?')}（{doc.get('title', '?')}）")
+                with col2:
+                    st.metric("科室", doc.get("department", "?"))
+                    st.metric("时间", f"{sched.get('schedule_date', '?')} {sched.get('time_slot', '?')}")
+                if appt.get("symptoms"):
+                    st.caption(f"主诉：{appt.get('symptoms', '')}")
+                if st.button("关闭详情", key="close_detail"):
+                    st.session_state.selected_appt = None
+                    st.rerun()
+
 
 # ============================================================
 # 懒加载 app
