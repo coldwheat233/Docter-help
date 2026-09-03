@@ -376,15 +376,30 @@ def send_message(user_input: str) -> None:
             st.session_state.messages.append({"role": "assistant", "content": block_msg})
             return
 
-    # 2. 追加用户消息
+    # 2. 急诊识别短路（v3 新增：medical safety 优先）
+    #    如果用户描述急诊症状，立即给 120 指引，**不调 LLM**（节省 5-10s + 立即响应）
+    from medical_agent.emergency import detect_emergency, build_emergency_response
+
+    is_em, matched = detect_emergency(user_input)
+    if is_em:
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(user_input)
+        emergency_msg = build_emergency_response(matched)
+        with st.chat_message("assistant", avatar="🚑"):
+            st.error(emergency_msg)
+        st.session_state.messages.append({"role": "assistant", "content": emergency_msg})
+        return
+
+    # 3. 追加用户消息
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user", avatar="👤"):
         st.markdown(user_input)
 
-    # 3. 清空上一次预约结果
+    # 4. 清空上一次预约结果
     st.session_state.last_appointment_result = None
 
-    # 4. 流式调用
+    # 5. 流式调用
     with st.chat_message("assistant", avatar="🤖"):
         try:
             full_response = st.write_stream(stream_agent_response(user_input))
@@ -393,7 +408,7 @@ def send_message(user_input: str) -> None:
             st.error(error_msg)
             full_response = error_msg
 
-    # 5. 输出护栏
+    # 6. 输出护栏
     if enable_guardrails and full_response:
         out_gr = check_output(full_response)
         if not out_gr.is_safe:

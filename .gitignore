@@ -52,6 +52,11 @@ coverage.xml
 *.db-journal
 data/*.sqlite
 data/*.sqlite-journal
+# v3: 大文件不进 git（自动重新生成）
+data/embeddings.npy
+data/embeddings_meta.json
+data/medical.db-shm
+data/medical.db-wal
 logs/
 *.log
 
