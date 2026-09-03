@@ -162,7 +162,7 @@ else:
             appts = data.get("appointments", [])
             if not appts:
                 st.info("您还没有预约记录")
-                st.caption("试试说"我想挂号"开始预约")
+                st.caption("试试说《我想挂号》开始预约")
             else:
                 for a in appts:
                     status_emoji = {
