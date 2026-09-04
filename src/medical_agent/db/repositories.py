@@ -860,6 +860,38 @@ class AuditLogRepository:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
 
+    def write(
+        self,
+        event_type: str,
+        entity_type: str,
+        entity_id: str,
+        actor: str,
+        action: str,
+        before_state: dict | None,
+        after_state: dict | None,
+        metadata: dict | None = None,
+    ) -> int:
+        """Public 写审计日志（admin_tools / 其他模块用）。"""
+        import json as _json
+        cur = self.conn.execute(
+            """INSERT INTO audit_log
+               (event_type, entity_type, entity_id, actor, action,
+                before_state, after_state, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event_type,
+                entity_type,
+                entity_id,
+                actor,
+                action,
+                _json.dumps(before_state, ensure_ascii=False) if before_state else None,
+                _json.dumps(after_state, ensure_ascii=False) if after_state else None,
+                _json.dumps(metadata or {}, ensure_ascii=False),
+            ),
+        )
+        self.conn.commit()
+        return cur.lastrowid  # type: ignore
+
     def list_by_entity(self, entity_type: str, entity_id: str) -> list[dict[str, Any]]:
         cur = self.conn.execute(
             """SELECT * FROM audit_log

@@ -30,17 +30,18 @@ from medical_agent.guardrails import check_input, check_output  # noqa: E402
 
 
 # ============================================================
-# 视图模式（URL ?dev=1 进开发者）
+# 视图模式（URL ?dev=1 进开发者，?admin=1 进业务中台）
 # ============================================================
 query_params = st.query_params
 DEV_MODE = query_params.get("dev", "0") == "1"
+ADMIN_MODE = query_params.get("admin", "0") == "1"
 
 # ============================================================
 # 页面配置
 # ============================================================
 st.set_page_config(
-    page_title="医疗预约助手" if not DEV_MODE else "医疗预约助手 [DEV]",
-    page_icon="🏥" if not DEV_MODE else "🔧",
+    page_title="医疗预约助手" if not DEV_MODE and not ADMIN_MODE else "医疗预约助手 [DEV]" if DEV_MODE else "业务中台 · Medical Agent",
+    page_icon="🏥" if not DEV_MODE and not ADMIN_MODE else "🔧" if DEV_MODE else "⚙️",
     layout="centered",
 )
 
@@ -62,10 +63,30 @@ with col_switch:
         if st.button("👤 切到患者视图", use_container_width=True):
             st.query_params.clear()
             st.rerun()
+    elif ADMIN_MODE:
+        if st.button("👤 切到患者视图", use_container_width=True):
+            st.query_params.clear()
+            st.rerun()
+        if st.button("🔧 开发者面板", use_container_width=True):
+            st.query_params["dev"] = "1"
+            st.rerun()
     else:
         if st.button("🔧 开发者面板", use_container_width=True):
             st.query_params["dev"] = "1"
             st.rerun()
+        if st.button("⚙️ 业务中台", use_container_width=True):
+            st.query_params["admin"] = "1"
+            st.rerun()
+
+
+# ============================================================
+# Admin 业务中台（?admin=1）
+# ============================================================
+if ADMIN_MODE:
+    from web.admin import render as render_admin
+
+    render_admin()
+    st.stop()
 
 
 # ============================================================
