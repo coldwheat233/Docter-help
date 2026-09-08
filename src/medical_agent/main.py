@@ -15,8 +15,25 @@ import sys
 from langchain_core.messages import HumanMessage
 
 from medical_agent.config import get_settings
+from medical_agent.graphs.hitl import format_interrupt_payload, get_pending_interrupt, resume_with_decision
 from medical_agent.graphs.supervisor import build_supervisor_app
 from medical_agent.graphs.swarm import build_swarm_app
+
+
+def _invoke_with_hitl(app, state_or_cmd, config) -> dict:
+    """invoke + HITL 审批循环：图暂停在 interrupt 时询问人工，approve 后继续。"""
+    result = app.invoke(state_or_cmd, config=config)
+    while True:
+        intr = get_pending_interrupt(app, config)
+        if intr is None:
+            return result
+        print()
+        print(format_interrupt_payload(intr))
+        try:
+            decision = input("🧑‍⚕️ 审核员 [approve / reject:原因]：").strip() or "reject:审核员未输入"
+        except (EOFError, KeyboardInterrupt):
+            decision = "reject:审核员中断"
+        result = resume_with_decision(app, config, decision)
 
 
 def run_interactive(mode: str = "supervisor") -> None:
@@ -50,9 +67,10 @@ def run_interactive(mode: str = "supervisor") -> None:
             continue
 
         try:
-            result = app.invoke(
+            result = _invoke_with_hitl(
+                app,
                 {"messages": [HumanMessage(content=user_input)]},
-                config=config,
+                config,
             )
             # 最后一条消息
             last_msg = result["messages"][-1]
@@ -69,10 +87,16 @@ def run_single_query(query: str, mode: str = "supervisor") -> None:
     app = build_supervisor_app() if mode == "supervisor" else build_swarm_app()
     config = {"configurable": {"thread_id": f"single-{mode}-001"}}
 
-    result = app.invoke(
-        {"messages": [HumanMessage(content=query)]},
-        config=config,
-    )
+    try:
+        result = _invoke_with_hitl(
+            app,
+            {"messages": [HumanMessage(content=query)]},
+            config,
+        )
+    except Exception as e:
+        print(f"\n👤 Query: {query}")
+        print(f"❌ 出错：{type(e).__name__}: {e}")
+        return
     print(f"\n👤 Query: {query}")
     print(f"🤖 Response: {result['messages'][-1].content}")
     print(f"📊 Total messages: {len(result['messages'])}")

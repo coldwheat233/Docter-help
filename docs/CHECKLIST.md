@@ -7,7 +7,7 @@
 - [ ] **A. 真实缓存层**（cache_service.py）— 抽象本地 + Redis 双后端
 - [ ] **B. 全局限流**（令牌桶 100 RPS）— 系统级保护
 - [ ] **C. PostgresSaver**（状态持久化）— 替代 InMemorySaver
-- [ ] **D. HITL interrupt 完整接入**（interrupt() 在节点用）
+- [x] **D. HITL interrupt 完整接入**（v4：interrupt() 下沉到 set/cancel/reschedule/restore 四个写工具内部，机制级把门；CLI/Web/eval 三端已适配 resume）
 - [ ] **E. 5 分钟 demo 录屏脚本**（端到端自动跑）
 - [ ] **F. 实习报告**（docs/06 素材合成）
 - [ ] **G. docs/ 推上 GitHub**

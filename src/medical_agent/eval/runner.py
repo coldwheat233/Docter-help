@@ -33,6 +33,8 @@ class CaseResult:
     actual: dict
     errors: list[str] = field(default_factory=list)
     duration_ms: int = 0
+    hitl_interrupted: bool = False
+    """真实跑到了 interrupt 审批点（HITL 机制生效的证据）"""
 
 
 @dataclass
@@ -54,6 +56,67 @@ class EvalSummary:
 # =====================================================================
 # 单条用例执行
 # =====================================================================
+def _patient_appointments(patient_id: str) -> list[dict]:
+    """直接查 DB：某患者的全部预约（真实落库状态，比扫消息可靠）。"""
+    from medical_agent.db.database import get_db
+
+    db = get_db()
+    cur = db.execute(
+        "SELECT id, status, schedule_id FROM appointments WHERE patient_id = ? ORDER BY rowid",
+        (patient_id,),
+    )
+    rows = cur.fetchall()
+    out = []
+    for r in rows:
+        try:
+            out.append(dict(r))
+        except (TypeError, ValueError):
+            out.append({"id": r[0], "status": r[1], "schedule_id": r[2]})
+    return out
+
+
+def _seed_appointment_for_case(patient_id: str) -> str | None:
+    """为 cancel/reschedule 用例预置一条真实预约（绕过 HITL，模拟历史数据）。
+
+    Returns:
+        预约单号；失败返回 None
+    """
+    import os
+
+    from medical_agent.db.database import get_db
+    from medical_agent.db.repositories import ScheduleRepository
+    from medical_agent.tools.appointment import set_appointment
+
+    db = get_db()
+    schedules = ScheduleRepository(db).find_available(
+        department="消化科",
+        start_date=__import__("datetime").date.today(),
+        end_date=__import__("datetime").date.today() + __import__("datetime").timedelta(days=7),
+    )
+    if not schedules:
+        return None
+    s = schedules[0]
+    old = os.environ.get("MEDICAL_HITL_BYPASS")
+    os.environ["MEDICAL_HITL_BYPASS"] = "1"
+    try:
+        result = json.loads(
+            set_appointment.func(
+                patient_id=patient_id,
+                doctor_id=s["doctor_id"],
+                schedule_id=s["schedule_id"],
+                expected_schedule_version=s["schedule_version"],
+                idempotency_key=f"eval-seed-{patient_id}-{s['schedule_id']}",
+                symptoms="eval 预置预约",
+            )
+        )
+    finally:
+        if old is None:
+            os.environ.pop("MEDICAL_HITL_BYPASS", None)
+        else:
+            os.environ["MEDICAL_HITL_BYPASS"] = old
+    return result.get("appointment_id") if result.get("success") else None
+
+
 def run_case(case: dict, app=None, thread_id_prefix: str = "eval") -> CaseResult:
     """跑一条测试用例。
 
@@ -72,6 +135,7 @@ def run_case(case: dict, app=None, thread_id_prefix: str = "eval") -> CaseResult
     actual_steps: list[str] = []
     actual_intent: str | None = None
     actual_final_status: str | None = None
+    hitl_interrupted = False
 
     # 1. intent 用规则分类（不依赖 LLM）
     first_msg = case["user_messages"][0] if case.get("user_messages") else ""
@@ -81,13 +145,54 @@ def run_case(case: dict, app=None, thread_id_prefix: str = "eval") -> CaseResult
     if app is not None:
         from langchain_core.messages import HumanMessage
 
+        from medical_agent.graphs.hitl import get_pending_interrupt, resume_with_decision
+
         config = {"configurable": {"thread_id": f"{thread_id_prefix}-{case['case_id']}"}}
-        for i, user_msg in enumerate(case.get("user_messages", [])):
+        # 模拟登录态注入 patient_id（对齐 Web 端真实行为）
+        patient_id = case.get("patient_id", "P20240001")
+        expected = case.get("expected", {})
+
+        # cancel/reschedule 类用例：预置一条真实预约（否则没有可取消/可改约的对象）
+        seeded_appointment_id: str | None = None
+        seeded_schedule_id: int | None = None
+        if expected.get("intent") in ("cancel", "reschedule"):
+            seeded_appointment_id = _seed_appointment_for_case(patient_id)
+            if seeded_appointment_id:
+                for a in _patient_appointments(patient_id):
+                    if a["id"] == seeded_appointment_id:
+                        seeded_schedule_id = a["schedule_id"]
+                # 把预约号告诉"用户"，模拟真实场景（用户知道自己有预约）
+                # 不改 case 文件，追加为首条消息的上下文
+            else:
+                errors.append("预置预约失败（无可用排班）")
+
+        before_ids = {a["id"] for a in _patient_appointments(patient_id)}
+
+        # book 类用例补两句："选第一个" → "确认"（对齐真实 UX：先选定时段，复述后再确认落库）
+        user_msgs = list(case.get("user_messages", []))
+        if expected.get("final_status") == "confirmed" and expected.get("intent") == "book":
+            if not any("确认" in m for m in user_msgs):
+                user_msgs.extend(["就选第一个吧", "确认"])
+        if seeded_appointment_id and user_msgs:
+            user_msgs[0] = f"{user_msgs[0]}（我的预约号是 {seeded_appointment_id}）"
+        for i, user_msg in enumerate(user_msgs):
             try:
                 result = app.invoke(
-                    {"messages": [HumanMessage(content=user_msg)]},
+                    {
+                        "messages": [HumanMessage(content=user_msg)],
+                        "patient_id": patient_id,
+                    },
                     config=config,
                 )
+                # HITL：图暂停在写工具 interrupt 时自动 approve（模拟审核员）
+                # 最多批 5 次，防死循环
+                for _ in range(5):
+                    intr = get_pending_interrupt(app, config)
+                    if intr is None:
+                        break
+                    hitl_interrupted = True
+                    actual_steps.append("hitl_interrupt")
+                    result = resume_with_decision(app, config, "approve")
                 for m in result.get("messages", []):
                     cls_name = m.__class__.__name__
                     if cls_name == "AIMessage":
@@ -101,14 +206,31 @@ def run_case(case: dict, app=None, thread_id_prefix: str = "eval") -> CaseResult
                                 actual_steps.append(name)
                     elif cls_name == "ToolMessage":
                         actual_steps.append(f"tool:{m.name}")
-                        content = getattr(m, "content", "")
-                        if isinstance(content, str):
-                            if "confirmed" in content.lower():
-                                actual_final_status = "confirmed"
-                            elif "cancelled" in content.lower():
-                                actual_final_status = "cancelled"
             except Exception as e:
                 errors.append(f"round {i + 1}: {type(e).__name__}: {e}")
+
+        # final_status 真实判定：查 DB，不扫消息
+        appts_after = _patient_appointments(patient_id)
+        new_appts = [a for a in appts_after if a["id"] not in before_ids]
+        intent = expected.get("intent")
+        if intent == "book":
+            if any(a["status"] == "confirmed" for a in new_appts):
+                actual_final_status = "confirmed"
+            elif not errors:
+                # 发起了预约但未走完（如信息不全被反问）→ intake_in_progress
+                actual_final_status = "intake_in_progress"
+        elif intent == "cancel" and seeded_appointment_id:
+            for a in appts_after:
+                if a["id"] == seeded_appointment_id and a["status"] == "cancelled":
+                    actual_final_status = "cancelled"
+        elif intent == "reschedule" and seeded_appointment_id:
+            for a in appts_after:
+                if a["id"] == seeded_appointment_id and a["schedule_id"] != seeded_schedule_id:
+                    actual_final_status = "confirmed"  # 改约成功，状态保持 confirmed
+        elif intent == "consult":
+            # 咨询类：流程没报错、有正常回复即视为 answered
+            if not errors:
+                actual_final_status = "answered"
 
     # 3. 断言
     expected = case.get("expected", {})
@@ -117,7 +239,8 @@ def run_case(case: dict, app=None, thread_id_prefix: str = "eval") -> CaseResult
             errors.append(
                 f"intent mismatch: expected={expected['intent']}, actual={actual_intent}"
             )
-    if "final_status" in expected and actual_final_status:
+    # final_status 只在真跑 app 时断言（规则模式没跑流程，不应误报通过/失败）
+    if app is not None and "final_status" in expected:
         if actual_final_status != expected["final_status"]:
             errors.append(
                 f"final_status mismatch: expected={expected['final_status']}, actual={actual_final_status}"
@@ -136,6 +259,7 @@ def run_case(case: dict, app=None, thread_id_prefix: str = "eval") -> CaseResult
         },
         errors=errors,
         duration_ms=duration_ms,
+        hitl_interrupted=hitl_interrupted,
     )
 
 
@@ -165,16 +289,23 @@ def run_all(cases_dir: Path, app=None) -> EvalSummary:
         for r, c in zip(results, cases)
         if r.actual.get("intent") == c.get("expected", {}).get("intent")
     )
+    # 流程完整率只统计声明了 final_status 的用例（避免 None==None 假阳性）
+    flow_cases = [
+        (r, c) for r, c in zip(results, cases) if c.get("expected", {}).get("final_status")
+    ]
     flow_completed = sum(
         1
-        for r, c in zip(results, cases)
+        for r, c in flow_cases
         if r.actual.get("final_status") == c.get("expected", {}).get("final_status")
     )
-    hitl_compliant = sum(
-        1
+    hitl_required_cases = [
+        (r, c)
         for r, c in zip(results, cases)
         if c.get("expected", {}).get("hitl_required", False)
-    )
+    ]
+    # HITL 合规率 = 声明需要人工确认的用例中，真实触发了 interrupt 审批点的比例
+    # （旧算法只数标记数量，是假指标；v4 起机制级 interrupt 可实测）
+    hitl_compliant = sum(1 for r, _ in hitl_required_cases if r.hitl_interrupted)
 
     return EvalSummary(
         total=total,
@@ -182,8 +313,10 @@ def run_all(cases_dir: Path, app=None) -> EvalSummary:
         failed=total - passed,
         pass_rate=passed / total if total else 0.0,
         intent_accuracy=intent_correct / total if total else 0.0,
-        flow_completion_rate=flow_completed / total if total else 0.0,
-        hitl_compliance_rate=hitl_compliant / total if total else 0.0,
+        flow_completion_rate=flow_completed / len(flow_cases) if flow_cases else 0.0,
+        hitl_compliance_rate=(
+            hitl_compliant / len(hitl_required_cases) if hitl_required_cases else 0.0
+        ),
         avg_duration_ms=(
             sum(r.duration_ms for r in results) / total if total else 0
         ),

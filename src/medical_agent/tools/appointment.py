@@ -5,16 +5,26 @@ v3 增强：
 - 落库前 re-check（防排班已变）
 - idempotency_key 防 Agent 重入
 - 错误码标准化（便于 Agent 解释给用户）
+
+v4 增强（机制级 HITL）：
+- 三个写工具（set/cancel/reschedule/restore）在副作用发生前调 interrupt()
+  暂停整个图，等待人工 approve 后才真正落库 —— 不再依赖 prompt 约定
+- 调用方（CLI/Web/eval）用 Command(resume="approve" | "reject:原因") 恢复
+- 非图执行环境（单测直接 .func、demo 脚本）：默认拒绝写入，
+  需显式设环境变量 MEDICAL_HITL_BYPASS=1 才放行（不暴露为工具参数，LLM 无法绕过）
 """
 
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime
 from typing import Any
 
 from langchain_core.tools import tool
+from langgraph.errors import GraphInterrupt
+from langgraph.types import interrupt
 
 from medical_agent.db.repositories import (
     AppointmentRepository,
@@ -67,6 +77,47 @@ def _recheck_schedule(schedule_id: int) -> dict:
         "version": schedule["version"],
         "remaining": schedule["remaining"],
     }
+
+
+# =====================================================================
+# HITL 把门（机制级）
+# =====================================================================
+_APPROVE_WORDS = {"approve", "确认", "好", "好的", "yes", "ok", "y", "同意", "批准"}
+
+
+def _require_human_approval(payload: dict) -> str | None:
+    """interrupt 暂停图，等待人工审批。
+
+    Args:
+        payload: 给人工审核员看的操作详情（type/action/关键字段）
+
+    Returns:
+        None = 审批通过，继续执行写操作；
+        str  = JSON 错误响应（被拒绝 / 环境不支持），直接 return 给 LLM
+    """
+    try:
+        decision = interrupt(payload)
+    except GraphInterrupt:
+        # 图内正常暂停信号——必须原样上抛，绝不能吞
+        # （GraphInterrupt 继承自 Exception，会被裸 except 捕获）
+        raise
+    except Exception:
+        # 非图执行环境（单测直接 .func()、demo 脚本直接调）：
+        # interrupt 抛异常。默认拒绝写入；显式 bypass 才放行。
+        if os.environ.get("MEDICAL_HITL_BYPASS", "").lower() in ("1", "true", "yes"):
+            return None
+        return _error_response(
+            "HITL_UNAVAILABLE",
+            "当前环境无法发起人工确认（需在带 checkpointer 的图内调用），写操作已拦截",
+        )
+
+    text = str(decision).strip().lower()
+    if text.startswith("approve") or text in _APPROVE_WORDS:
+        return None
+    return _error_response(
+        "HITL_REJECTED",
+        f"人工审核未通过，写操作已取消。审核意见：{decision}",
+    )
 
 
 # =====================================================================
@@ -150,6 +201,29 @@ def set_appointment(
             f"排班 {schedule_id} 有上游变更未应用，请重新调用 check_availability",
         )
 
+    # 4.5 HITL 把门（机制级）：interrupt 暂停图，人工 approve 后才继续落库
+    # 注意：resume 后工具会从头重跑，上面的校验/re-check 会再执行一次（更安全）
+    hitl_payload: dict[str, Any] = {
+        "type": "appointment_create",
+        "action": "创建预约（落库）",
+        "patient_id": patient_id,
+        "doctor_id": doctor_id,
+        "schedule_id": schedule_id,
+        "symptoms": symptoms,
+        "duration": duration,
+        "severity": severity,
+        "ask": "是否批准写入预约？回复 'approve' 或 'reject:原因'",
+    }
+    try:
+        schedule_info = ScheduleRepository(db).get_by_id(schedule_id) or {}
+        hitl_payload["schedule_date"] = schedule_info.get("schedule_date")
+        hitl_payload["time_slot"] = schedule_info.get("time_slot")
+    except Exception:
+        pass
+    rejection = _require_human_approval(hitl_payload)
+    if rejection is not None:
+        return rejection
+
     # 5. 生成 idempotency_key
     effective_key = idempotency_key or f"appt-{uuid.uuid4().hex}"
 
@@ -193,6 +267,19 @@ def cancel_appointment(appointment_id: str, reason: str = "") -> str:
     Returns:
         JSON 字符串
     """
+    # HITL 把门（机制级）
+    rejection = _require_human_approval(
+        {
+            "type": "appointment_cancel",
+            "action": "取消预约",
+            "appointment_id": appointment_id,
+            "reason": reason,
+            "ask": "是否批准取消？回复 'approve' 或 'reject:原因'",
+        }
+    )
+    if rejection is not None:
+        return rejection
+
     from medical_agent.db.database import get_db
 
     db = get_db()
@@ -231,6 +318,19 @@ def reschedule_appointment(
     Returns:
         JSON 字符串
     """
+    # HITL 把门（机制级）
+    rejection = _require_human_approval(
+        {
+            "type": "appointment_reschedule",
+            "action": "改约到新时段",
+            "appointment_id": appointment_id,
+            "new_schedule_id": new_schedule_id,
+            "ask": "是否批准改约？回复 'approve' 或 'reject:原因'",
+        }
+    )
+    if rejection is not None:
+        return rejection
+
     from medical_agent.db.database import get_db
 
     db = get_db()
@@ -259,6 +359,18 @@ def reschedule_appointment(
 @tool
 def restore_appointment(appointment_id: str) -> str:
     """恢复已取消的预约（v2 新增）。限制：取消时间在 24h 内。"""
+    # HITL 把门（机制级）
+    rejection = _require_human_approval(
+        {
+            "type": "appointment_restore",
+            "action": "恢复已取消预约",
+            "appointment_id": appointment_id,
+            "ask": "是否批准恢复？回复 'approve' 或 'reject:原因'",
+        }
+    )
+    if rejection is not None:
+        return rejection
+
     from medical_agent.db.database import get_db
 
     db = get_db()

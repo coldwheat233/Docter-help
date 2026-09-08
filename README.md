@@ -12,10 +12,11 @@
 
 **核心特性**：
 - ✅ **4 个子 Agent 协作**：路由 / 问诊 / 推荐 / 确认
-- ✅ **Supervisor 集中编排**（主）+ **Swarm 去中心化对比实验**
-- ✅ **HITL 100% 把门**：所有写操作前必须人工确认
+- ✅ **规则前置路由 + LLM Supervisor 兜底**：意图明确走确定性直连节点（0ms、不翻车），意图模糊才交给 LLM 路由
+- ✅ **确定性问诊抽取**：intake 用结构化输出直接写 state，不赌工具调用
+- ✅ **HITL 100% 把门（机制级）**：`interrupt()` 下沉到 set/cancel/reschedule/restore 四个写工具内部，人工 approve 前不产生任何副作用，不依赖 prompt 约定
 - ✅ **SQLite 5 张表**：科室 / 医生 / 排班 / 患者 / 预约
-- ✅ **LangSmith 全链路追踪**
+- ✅ **LangSmith 全链路追踪**（配置 LANGSMITH_API_KEY 后启用）
 
 ## 项目结构
 
@@ -95,6 +96,21 @@ python demos/03_medical_appointment_demo.py
 python -m medical_agent.main
 ```
 
+### 6. React 前端（推荐演示入口）
+
+「数字病历夹」设计：聊天 = 病历纸，HITL 审批 = 盖章。
+
+```bash
+# 终端 1：FastAPI 后端（包 LangGraph 链路）
+python -m uvicorn web.api:app --port 8000
+
+# 终端 2：Vite 前端
+cd web-react && npm install && npm run dev
+# 打开 http://localhost:5173
+```
+
+生产模式：`cd web-react && npm run build` 后只起 FastAPI（8000 端口直接托管 dist）。
+
 ## 命令行用法
 
 ```bash
@@ -166,10 +182,12 @@ tests/test_repositories.py .....    [100%]
 
 ## 风险与限制
 
-- **第 1 周为骨架阶段**：Agent 不真正调用工具、不落库，HITL 流程未启用
+- **conda 环境名不符**：README 原说装到 `medical-appointment` env，实际依赖装在 `D:\miniconda3\envs\python311`；base 环境缺 `langchain_deepseek`/`langgraph_supervisor`，跑测试请用 python311 env
 - **D 盘空间紧**：conda env 必须装到 C 盘（`miniconda3\envs\medical-appointment`）
 - **Python 3.13 兼容性未明确**：本项目用 3.11
 - **deepseek-reasoner 不支持 tool calling**：必须用 `deepseek-chat`
+- **Swarm 模式是空壳对比实验**：4 个 Agent 只挂 handoff 工具，无业务工具，不能完成真实预约；演示请用 Supervisor 模式
+- **非图环境写操作默认拦截**：单测/demo 直接调写工具需设 `MEDICAL_HITL_BYPASS=1`
 
 ## 贡献者
 

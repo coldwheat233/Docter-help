@@ -47,6 +47,10 @@ class AppointmentState(TypedDict, total=False):
     messages: Annotated[list[Any], add_messages]
     """对话消息列表，LangGraph 自动用 add_messages reducer 累加"""
 
+    # ---------- ReAct 内部字段 ----------
+    remaining_steps: int
+    """[internal] create_react_agent/create_supervisor 要求的剩余步数（防无限循环）"""
+
     # ---------- 用户身份 ----------
     patient_id: str | None
     """患者 ID（[input]）。第 2 周接入用户系统"""

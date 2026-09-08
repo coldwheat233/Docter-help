@@ -568,15 +568,96 @@ def send_message(user_input: str) -> None:
             "metadata": result,
         })
 
+    # 8. HITL 检测（v4）：图是否暂停在人工审批点（写工具 interrupt）
+    from medical_agent.graphs.hitl import get_pending_interrupt
+
+    config = {"configurable": {"thread_id": st.session_state.thread_id}}
+    intr = get_pending_interrupt(app, config)
+    if intr is not None:
+        st.session_state.pending_hitl = getattr(intr, "value", intr)
+    else:
+        st.session_state.pending_hitl = None
+
+
+def render_hitl_approval() -> None:
+    """渲染 HITL 人工审批卡片（图暂停在写工具 interrupt 时）。"""
+    payload = st.session_state.get("pending_hitl")
+    if not payload:
+        return
+
+    from medical_agent.graphs.hitl import format_interrupt_payload
+
+    st.warning("🔔 **人工审批待处理** —— 系统已暂停，写操作尚未落库")
+    with st.container(border=True):
+        if isinstance(payload, dict):
+            st.markdown(f"**操作**：{payload.get('action', payload.get('type', '未知'))}")
+            for k, v in payload.items():
+                if k in ("type", "action", "ask") or v in (None, "", 0):
+                    continue
+                st.markdown(f"- **{k}**：{v}")
+        else:
+            st.code(str(payload))
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            approve = st.button("✅ 批准（approve）", use_container_width=True, type="primary")
+        with col_b:
+            reject_reason = st.text_input("拒绝原因", key="hitl_reject_reason", placeholder="不批准请输入原因")
+            reject = st.button("❌ 拒绝（reject）", use_container_width=True)
+
+    if not (approve or reject):
+        return
+
+    decision = "approve" if approve else f"reject:{reject_reason or '未填写原因'}"
+    config = {"configurable": {"thread_id": st.session_state.thread_id}}
+
+    from medical_agent.graphs.hitl import resume_with_decision
+
+    st.session_state.pending_hitl = None
+    with st.spinner("已提交审批结果，等待系统继续执行..."):
+        result = resume_with_decision(app, config, decision)
+
+    # 提取审批后的新消息（跳过已展示的）
+    shown = len([m for m in st.session_state.messages if m["role"] in ("user", "assistant")])
+    new_texts = []
+    for m in result.get("messages", []):
+        cls = m.__class__.__name__
+        if cls == "AIMessage":
+            content = getattr(m, "content", "")
+            if isinstance(content, str) and content.strip():
+                new_texts.append(content)
+        elif cls == "ToolMessage":
+            try:
+                parsed = json.loads(getattr(m, "content", "") or "")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(parsed, dict) and "success" in parsed:
+                if parsed.get("success"):
+                    new_texts.append(f"✅ 预约成功！预约号 {parsed.get('appointment_id', '')}")
+                else:
+                    new_texts.append(
+                        f"❌ 操作未执行：{parsed.get('error_message', '')}（{parsed.get('error_code', '')}）"
+                    )
+    for t in new_texts[-1:]:
+        st.session_state.messages.append({"role": "assistant", "content": t})
+    st.rerun()
+
 
 # 侧边栏按钮
 pending = st.session_state.pop("pending_input", None)
 if pending:
     send_message(pending)
 
+# HITL 审批卡片（有 pending 审批时优先渲染）
+render_hitl_approval()
+
 # chat input
-placeholder = "请描述您哪里不舒服" if not DEV_MODE else "说点什么..."
-if user_input := st.chat_input(placeholder):
+hitl_pending = bool(st.session_state.get("pending_hitl"))
+placeholder = (
+    "请先处理上方人工审批" if hitl_pending
+    else "请描述您哪里不舒服" if not DEV_MODE else "说点什么..."
+)
+if user_input := st.chat_input(placeholder, disabled=hitl_pending):
     send_message(user_input)
 
 

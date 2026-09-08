@@ -20,6 +20,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+# 脚本化 demo 直接调工具（不进图），显式 bypass 工具内 HITL interrupt
+# 真实链路（CLI/Web）不 bypass，写操作必须人工 approve
+import os
+
+os.environ.setdefault("MEDICAL_HITL_BYPASS", "1")
+
 
 def print_section(title: str) -> None:
     print()
