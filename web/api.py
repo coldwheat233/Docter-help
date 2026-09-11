@@ -428,11 +428,33 @@ def _sse(event: str, data: Any) -> str:
 
 
 def _stream_chat(req: ChatRequest, thread_id: str, patient_id: str):
-    """SSE 生成器：progress → messages → pending_approval? → done。"""
+    """SSE 生成器：立即回执 → 路由预告 → progress → messages → pending_approval? → done。"""
     from langchain_core.messages import HumanMessage
 
+    t_start = time.time()
     graph_app = get_graph_app()
     before = _msg_count(graph_app, thread_id)
+
+    # 1) 立即回执（<50ms）——用户立刻知道系统活着
+    yield _sse("progress", {"label": "📥 已收到，开始处理…"})
+
+    # 2) 路由预告：确定性路由在本地算，0 LLM 成本，直接告诉用户去哪
+    last_label = "📥 已收到，开始处理…"
+    try:
+        from medical_agent.graphs.supervisor import route_after_merge
+
+        snap = graph_app.get_state(_config(thread_id))
+        preview_state = {
+            **(snap.values or {}),
+            "messages": [HumanMessage(content=req.message.strip())],
+        }
+        route = route_after_merge(preview_state)
+        preview_label = _NODE_PROGRESS.get(route)
+        if preview_label:
+            yield _sse("progress", {"label": preview_label})
+            last_label = preview_label
+    except Exception:
+        pass
 
     try:
         for mode, chunk in graph_app.stream(
@@ -441,16 +463,22 @@ def _stream_chat(req: ChatRequest, thread_id: str, patient_id: str):
             stream_mode=["updates", "custom"],
         ):
             if mode == "custom" and isinstance(chunk, dict) and chunk.get("type") == "progress":
-                yield _sse("progress", {"label": chunk["label"]})
+                lbl = chunk["label"]
+                if lbl != last_label:  # 与上一条重复的不发（路由预告可能已发过）
+                    yield _sse("progress", {"label": lbl})
+                    last_label = lbl
             elif mode == "updates" and isinstance(chunk, dict):
                 for node_name in chunk:
-                    label = _NODE_PROGRESS.get(node_name)
-                    if label:
-                        yield _sse("progress", {"label": label})
+                    lbl = _NODE_PROGRESS.get(node_name)
+                    if lbl and lbl != last_label:
+                        yield _sse("progress", {"label": lbl})
+                        last_label = lbl
     except Exception as e:
+        print(f"[timing] thread={thread_id} FAILED after {time.time() - t_start:.1f}s: {e}")
         yield _sse("error", {"detail": f"{type(e).__name__}: {e}"})
         return
 
+    print(f"[timing] thread={thread_id} total={time.time() - t_start:.1f}s")
     yield _sse("messages", _sanitize_messages(_new_messages(graph_app, thread_id, before)))
     pending = _pending_approval(graph_app, thread_id)
     if pending:

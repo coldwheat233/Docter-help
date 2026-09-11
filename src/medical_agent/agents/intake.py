@@ -166,7 +166,11 @@ def build_intake_node():
     """
 
     def intake_node(state: dict) -> dict:
-        llm = get_llm()
+        from medical_agent.progress import emit_progress
+
+        emit_progress("📝 正在整理问诊信息…")  # 节点开始就发，不等 LLM 返回
+
+        llm = get_llm(max_tokens=512)  # 结构化抽取输出很短，限制 token 提速
         extractor = llm.with_structured_output(IntakeExtraction)
 
         # 拼对话历史（最近 12 条够用）
