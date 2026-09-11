@@ -1,15 +1,16 @@
-/** 左侧栏：病历夹（患者卡 + 我的预约） */
+/** 左侧栏：病历夹（就诊人卡 + 我的预约） */
 
 import { useCallback, useEffect, useState } from 'react'
 import { fetchAppointments } from '../api'
 import type { Appointment } from '../types'
 
 interface Props {
+  token: string
   patientId: string
+  patientName: string
+  onLogout: () => void
   refreshKey: number
 }
-
-const PATIENT = { id: 'P20240001', name: '张三', phone: '138****0001' }
 
 const STATUS_STYLE: Record<string, { label: string; cls: string }> = {
   confirmed: { label: '已确认', cls: 'bg-dai-mist text-dai-deep' },
@@ -19,23 +20,21 @@ const STATUS_STYLE: Record<string, { label: string; cls: string }> = {
   no_show: { label: '爽约', cls: 'bg-seal/10 text-seal' },
 }
 
-export default function Sidebar({ patientId, refreshKey }: Props) {
+export default function Sidebar({ token, patientId, patientName, onLogout, refreshKey }: Props) {
   const [appointments, setAppointments] = useState<Appointment[]>([])
   const [loading, setLoading] = useState(false)
-
-  const patient = PATIENT
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const data = await fetchAppointments(patientId)
+      const data = await fetchAppointments(token)
       setAppointments(data.appointments ?? [])
     } catch {
       setAppointments([])
     } finally {
       setLoading(false)
     }
-  }, [patientId])
+  }, [token])
 
   useEffect(() => {
     load()
@@ -53,15 +52,14 @@ export default function Sidebar({ patientId, refreshKey }: Props) {
         </p>
       </div>
 
-      {/* 就诊人卡（登录态展示，不可切换——真实系统来自登录） */}
+      {/* 就诊人卡（登录态） */}
       <div className="border-b border-dashed border-thread px-5 py-4">
         <p className="mb-2 font-serif-sc text-[11px] tracking-[0.3em] text-ink-faint">就诊人</p>
         <div className="rounded-sm border border-thread bg-paper px-3 py-2.5">
           <div className="flex items-center justify-between">
-            <span className="font-serif-sc text-[15px] font-bold text-ink">{patient.name}</span>
-            <span className="font-mono-id text-[10px] text-ink-faint">{patient.id}</span>
+            <span className="font-serif-sc text-[15px] font-bold text-ink">{patientName}</span>
+            <span className="font-mono-id text-[10px] text-ink-faint">{patientId}</span>
           </div>
-          <p className="mt-0.5 font-mono-id text-[10px] text-ink-faint">{patient.phone}</p>
         </div>
       </div>
 
@@ -69,7 +67,7 @@ export default function Sidebar({ patientId, refreshKey }: Props) {
       <div className="flex min-h-0 flex-1 flex-col px-5 py-4">
         <div className="mb-2 flex items-center justify-between">
           <p className="font-serif-sc text-[11px] tracking-[0.3em] text-ink-faint">
-            预约记录 · {patient.name}
+            预约记录 · {patientName}
           </p>
           <button
             onClick={load}
@@ -112,8 +110,14 @@ export default function Sidebar({ patientId, refreshKey }: Props) {
         </div>
       </div>
 
-      {/* 底部署名 */}
+      {/* 底部：退出 + 署名 */}
       <div className="border-t border-thread px-5 py-3">
+        <button
+          onClick={onLogout}
+          className="mb-2 w-full cursor-pointer rounded-sm border border-thread px-3 py-1.5 font-serif-sc text-[11px] tracking-[0.25em] text-ink-faint transition-colors hover:border-seal hover:text-seal"
+        >
+          退出登录
+        </button>
         <p className="font-mono-id text-[9.5px] leading-relaxed tracking-wider text-ink-faint/70">
           LANGGRAPH MULTI-AGENT
           <br />

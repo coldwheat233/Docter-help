@@ -249,7 +249,9 @@ def login(req: LoginRequest, request: Request) -> Any:
 
     db = get_db()
     row = db.execute(
-        "SELECT password_hash, salt, patient_id FROM users WHERE username = ?",
+        """SELECT u.password_hash, u.salt, u.patient_id, p.name
+           FROM users u LEFT JOIN patients p ON p.id = u.patient_id
+           WHERE u.username = ?""",
         (req.username,),
     ).fetchone()
     if not row or row["password_hash"] != _hash_password(req.password, row["salt"]):
@@ -258,7 +260,7 @@ def login(req: LoginRequest, request: Request) -> Any:
     token = secrets.token_urlsafe(24)
     with _sessions_lock:
         _sessions[token] = row["patient_id"]
-    return {"token": token, "patient_id": row["patient_id"]}
+    return {"token": token, "patient_id": row["patient_id"], "name": row["name"] or req.username}
 
 
 # =====================================================================

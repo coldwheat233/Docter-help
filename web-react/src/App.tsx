@@ -3,10 +3,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sendApproval, streamChat } from './api'
 import ApprovalCard from './components/ApprovalCard'
+import LoginView from './components/LoginView'
 import MessageBubble from './components/MessageBubble'
 import ProgressTrail from './components/ProgressTrail'
 import Sidebar from './components/Sidebar'
-import type { ApprovalPayload, ChatMessage } from './types'
+import type { ApprovalPayload, ChatMessage, Session } from './types'
+
+const SESSION_KEY = 'medical_session'
+
+function loadSession(): Session | null {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY)
+    return raw ? (JSON.parse(raw) as Session) : null
+  } catch {
+    return null
+  }
+}
 
 const WELCOME: ChatMessage = {
   role: 'assistant',
@@ -16,8 +28,7 @@ const WELCOME: ChatMessage = {
 }
 
 export default function App() {
-  // 单用户演示：固定就诊人（真实系统来自登录态，不在对话/界面上切换）
-  const [patientId] = useState('P20240001')
+  const [session, setSession] = useState<Session | null>(loadSession)
   const [threadId, setThreadId] = useState<string | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([WELCOME])
   const [input, setInput] = useState('')
@@ -25,6 +36,23 @@ export default function App() {
   const [pendingApproval, setPendingApproval] = useState<ApprovalPayload | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
   const [progress, setProgress] = useState<string[]>([])
+
+  const handleLogin = useCallback((s: Session) => {
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(s))
+    setSession(s)
+    setThreadId(null)
+    setMessages([WELCOME])
+    setPendingApproval(null)
+  }, [])
+
+  const handleLogout = useCallback(() => {
+    sessionStorage.removeItem(SESSION_KEY)
+    setSession(null)
+    setThreadId(null)
+    setMessages([WELCOME])
+    setPendingApproval(null)
+    setInput('')
+  }, [])
 
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -34,12 +62,12 @@ export default function App() {
 
   const handleSend = useCallback(async () => {
     const text = input.trim()
-    if (!text || busy) return
+    if (!text || busy || !session) return
     setInput('')
     setBusy(true)
     setProgress([])
     setMessages((prev) => [...prev, { role: 'user', content: text }])
-    await streamChat(text, threadId, patientId, {
+    await streamChat(text, threadId, session.token, {
       onProgress: (label) => setProgress((prev) => [...prev, label]),
       onMessages: (msgs) => {
         setMessages((prev) => [...prev, ...msgs.filter((m) => m.role !== 'user')])
@@ -58,9 +86,10 @@ export default function App() {
         setMessages((prev) => [...prev, { role: 'assistant', content: `❌ 请求失败：${detail}` }])
         setBusy(false)
         setProgress([])
+        if (detail.includes('登录')) handleLogout() // token 失效 → 回登录页
       },
     })
-  }, [input, busy, threadId, patientId])
+  }, [input, busy, threadId, session, handleLogout])
 
   const handleApprove = useCallback(
     async (decision: string) => {
@@ -88,7 +117,19 @@ export default function App() {
 
   return (
     <div className="flex h-full">
-      <Sidebar patientId={patientId} refreshKey={refreshKey} />
+      {!session ? (
+        <div className="relative h-full w-full">
+          <LoginView onLogin={handleLogin} />
+        </div>
+      ) : (
+        <>
+          <Sidebar
+            token={session.token}
+            patientId={session.patientId}
+            patientName={session.name}
+            onLogout={handleLogout}
+            refreshKey={refreshKey}
+          />
 
       {/* 主区：病历纸 */}
       <main className="relative flex min-w-0 flex-1 flex-col">
@@ -169,6 +210,8 @@ export default function App() {
           </p>
         </footer>
       </main>
+        </>
+      )}
     </div>
   )
 }

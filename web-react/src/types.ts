@@ -51,6 +51,13 @@ export interface Appointment {
   [k: string]: unknown
 }
 
+/** 登录会话 */
+export interface Session {
+  token: string
+  patientId: string
+  name: string
+}
+
 export const AGENT_LABELS: Record<string, string> = {
   router_agent: '分诊台',
   intake_agent: '问诊记录',

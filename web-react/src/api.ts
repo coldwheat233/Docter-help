@@ -1,6 +1,22 @@
 /** API 客户端（对接 web/api.py，dev 走 vite proxy） */
 
-import type { ApprovalPayload, ChatMessage, ChatResponse } from './types'
+import type { ApprovalPayload, ChatMessage, ChatResponse, Session } from './types'
+
+// =====================================================================
+// 认证
+// =====================================================================
+export function login(username: string, password: string): Promise<Session> {
+  return post('/api/login', { username, password })
+}
+
+export function register(
+  username: string,
+  password: string,
+  name: string,
+  phone = '',
+): Promise<Session> {
+  return post('/api/register', { username, password, name, phone })
+}
 
 async function post<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -20,20 +36,16 @@ async function post<T>(url: string, body: unknown): Promise<T> {
   return res.json()
 }
 
-export function sendChat(
-  message: string,
-  threadId: string | null,
-  patientId: string,
-): Promise<ChatResponse> {
-  return post('/api/chat', { message, thread_id: threadId, patient_id: patientId })
+export function sendChat(message: string, threadId: string | null, token: string): Promise<ChatResponse> {
+  return post('/api/chat', { message, thread_id: threadId, token })
 }
 
 export function sendApproval(threadId: string, decision: string): Promise<ChatResponse> {
   return post('/api/approve', { thread_id: threadId, decision })
 }
 
-export async function fetchAppointments(patientId: string) {
-  const res = await fetch(`/api/appointments?patient_id=${encodeURIComponent(patientId)}`)
+export async function fetchAppointments(token: string) {
+  const res = await fetch(`/api/appointments?token=${encodeURIComponent(token)}`)
   if (!res.ok) throw new Error(`appointments → ${res.status}`)
   return res.json()
 }
@@ -62,13 +74,13 @@ export interface StreamHandlers {
 export async function streamChat(
   message: string,
   threadId: string | null,
-  patientId: string,
+  token: string,
   handlers: StreamHandlers,
 ): Promise<void> {
   const res = await fetch('/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, thread_id: threadId, patient_id: patientId }),
+    body: JSON.stringify({ message, thread_id: threadId, token }),
   })
   if (!res.ok || !res.body) {
     let detail = `${res.status}`
