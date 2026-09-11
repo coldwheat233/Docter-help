@@ -32,6 +32,7 @@ from medical_agent.db.repositories import (
     ScheduleRepository,
     UpstreamChangeRepository,
 )
+from medical_agent.progress import emit_progress
 
 
 # =====================================================================
@@ -154,6 +155,7 @@ def set_appointment(
         JSON 字符串。成功：{"success": true, "appointment_id": ...}
                        失败：{"success": false, "error_code": "OPTIMISTIC_LOCK", ...}
     """
+    emit_progress("🛎️ 预约已提交人工审批…")
     # 1. 从 runtime 拿 state（覆盖默认参数）
     state = _get_state_from_runtime(runtime)
     if not patient_id:
@@ -267,6 +269,7 @@ def cancel_appointment(appointment_id: str, reason: str = "") -> str:
     Returns:
         JSON 字符串
     """
+    emit_progress("🛎️ 取消请求已提交人工审批…")
     # HITL 把门（机制级）
     rejection = _require_human_approval(
         {
@@ -318,6 +321,7 @@ def reschedule_appointment(
     Returns:
         JSON 字符串
     """
+    emit_progress("🛎️ 改约请求已提交人工审批…")
     # HITL 把门（机制级）
     rejection = _require_human_approval(
         {

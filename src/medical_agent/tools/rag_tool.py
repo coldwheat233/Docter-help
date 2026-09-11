@@ -31,6 +31,9 @@ def search_medical_knowledge(query: str, top_k: int = 3) -> str:
         JSON 字符串：[{id, topic, department, content, score}, ...]
     """
     from medical_agent.agents.hybrid_search import hybrid_search
+    from medical_agent.progress import emit_progress
+
+    emit_progress("📚 正在检索医学知识库…")
 
     try:
         results = hybrid_search(query, top_k=top_k)

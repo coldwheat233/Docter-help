@@ -100,9 +100,14 @@ python -m medical_agent.main
 
 「数字病历夹」设计：聊天 = 病历纸，HITL 审批 = 盖章。
 
+**一键启动（Windows）**：双击 `scripts\run_react_web.bat`（自动起后端+前端+开浏览器）
+
+手动启动：
 ```bash
 # 终端 1：FastAPI 后端（包 LangGraph 链路）
-python -m uvicorn web.api:app --port 8000
+# 注意：① 必须在项目根目录执行 ② 必须用 python311 环境（base 环境缺依赖）
+cd D:\PY_PROJ\NEW\medical-appointment-agent
+D:\miniconda3\envs\python311\python.exe -m uvicorn web.api:app --port 8000
 
 # 终端 2：Vite 前端
 cd web-react && npm install && npm run dev

@@ -21,6 +21,7 @@ from medical_agent.db.repositories import (
     ScheduleRepository,
 )
 from medical_agent.config import get_settings
+from medical_agent.progress import emit_progress
 
 
 @tool
@@ -30,6 +31,7 @@ def list_departments() -> str:
     Returns:
         JSON 字符串：科室列表，每项含 id / name / description
     """
+    emit_progress("🔍 正在查询科室列表…")
     from medical_agent.db.database import get_db
 
     db = get_db()
@@ -48,6 +50,7 @@ def list_doctors(department: str | None = None) -> str:
     Returns:
         JSON 字符串：医生列表，每项含 id / name / department / title / specialty
     """
+    emit_progress("🔍 正在查询医生信息…")
     from medical_agent.db.database import get_db
 
     db = get_db()
@@ -77,6 +80,7 @@ def check_availability(
     Returns:
         JSON 字符串：可用排班列表，每项含 doctor_id / doctor_name / date / time_slot / remaining
     """
+    emit_progress("🔍 正在查询可约排班…")
     from medical_agent.db.database import get_db
 
     db = get_db()
@@ -117,6 +121,7 @@ def select_slot(
     Returns:
         人类可读的确认文本（已选择某医生某时段）
     """
+    emit_progress("📌 已记下您选择的时段")
     from medical_agent.db.database import get_db
 
     db = get_db()

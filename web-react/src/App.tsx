@@ -1,9 +1,10 @@
 /** 主界面：病历纸聊天区 + 输入栏 */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { sendApproval, sendChat } from './api'
+import { sendApproval, streamChat } from './api'
 import ApprovalCard from './components/ApprovalCard'
 import MessageBubble from './components/MessageBubble'
+import ProgressTrail from './components/ProgressTrail'
 import Sidebar from './components/Sidebar'
 import type { ApprovalPayload, ChatMessage } from './types'
 
@@ -23,36 +24,42 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [pendingApproval, setPendingApproval] = useState<ApprovalPayload | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
+  const [progress, setProgress] = useState<string[]>([])
 
   const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages, pendingApproval, busy])
+  }, [messages, pendingApproval, busy, progress])
 
   const handleSend = useCallback(async () => {
     const text = input.trim()
     if (!text || busy) return
     setInput('')
     setBusy(true)
+    setProgress([])
     setMessages((prev) => [...prev, { role: 'user', content: text }])
-    try {
-      const res = await sendChat(text, threadId, patientId)
-      setThreadId(res.thread_id)
-      // 后端已回传 user 消息，这里只追加非 user 的新消息
-      setMessages((prev) => [...prev, ...res.messages.filter((m) => m.role !== 'user')])
-      setPendingApproval(res.pending_approval)
-      if (res.messages.some((m) => m.role === 'tool_result')) {
-        setRefreshKey((k) => k + 1) // 有写操作结果 → 刷新预约列表
-      }
-    } catch (e) {
-      setMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: `❌ 请求失败：${e instanceof Error ? e.message : e}` },
-      ])
-    } finally {
-      setBusy(false)
-    }
+    await streamChat(text, threadId, patientId, {
+      onProgress: (label) => setProgress((prev) => [...prev, label]),
+      onMessages: (msgs) => {
+        setMessages((prev) => [...prev, ...msgs.filter((m) => m.role !== 'user')])
+        if (msgs.some((m) => m.role === 'tool_result')) {
+          setRefreshKey((k) => k + 1) // 有写操作结果 → 刷新预约列表
+        }
+      },
+      onPendingApproval: (payload) => setPendingApproval(payload),
+      onDone: (tid) => {
+        setThreadId(tid)
+        setBusy(false)
+        // 进度条停一拍再撤，让用户看到"做完了"
+        setTimeout(() => setProgress([]), 900)
+      },
+      onError: (detail) => {
+        setMessages((prev) => [...prev, { role: 'assistant', content: `❌ 请求失败：${detail}` }])
+        setBusy(false)
+        setProgress([])
+      },
+    })
   }, [input, busy, threadId, patientId])
 
   const handleApprove = useCallback(
@@ -112,7 +119,7 @@ export default function App() {
               <MessageBubble key={i} msg={m} index={i} />
             ))}
 
-            {busy && !pendingApproval && (
+            {busy && !pendingApproval && progress.length === 0 && (
               <div className="msg-in flex justify-start">
                 <div className="flex items-center gap-1.5 rounded-sm border border-thread/70 bg-paper-deep/50 px-4 py-3">
                   <span className="think-dot h-1.5 w-1.5 rounded-full bg-dai" />
@@ -121,6 +128,8 @@ export default function App() {
                 </div>
               </div>
             )}
+
+            {progress.length > 0 && !pendingApproval && <ProgressTrail steps={progress} />}
 
             {pendingApproval && (
               <ApprovalCard payload={pendingApproval} onDecide={handleApprove} busy={busy} />

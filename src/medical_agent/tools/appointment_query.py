@@ -40,6 +40,9 @@ def query_my_appointments(
     """
     from medical_agent.db.database import get_db
     from medical_agent.db.repositories import AppointmentRepository
+    from medical_agent.progress import emit_progress
+
+    emit_progress("🔍 正在查询您的预约记录…")
 
     # 1. 从 runtime 拿 patient_id
     state = _get_state_from_runtime(runtime)

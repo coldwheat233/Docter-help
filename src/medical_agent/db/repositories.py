@@ -453,6 +453,15 @@ class PatientRepository:
 # =====================================================================
 # 5. AppointmentRepository（v2：事务 + 幂等性 + 状态机）
 # =====================================================================
+import threading
+
+# v4 并发修复：单进程内写操作互斥锁。
+# 原因：全局单例 sqlite 连接 + check_same_thread=False，多线程下显式
+# BEGIN IMMEDIATE 与 pysqlite 隐式事务管理交织，实测 10 线程抢 1 号
+# 有 2 个成功（超卖）。SQLite 本来就是单写者，进程级互斥锁是对的做法。
+# 生产多进程/多实例部署请换 Postgres（行级锁）。
+_APPT_WRITE_LOCK = threading.Lock()
+# =====================================================================
 class AppointmentRepository:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
@@ -477,21 +486,36 @@ class AppointmentRepository:
         severity: str = "",
         idempotency_key: str | None = None,
     ) -> str:
-        """创建预约。事务原子性 + 乐观锁 + 幂等性。
-
-        Args:
-            patient_id, doctor_id, schedule_id: 必填
-            expected_schedule_version: 期望的 schedule 版本号（v2 校验）
-            symptoms, duration, severity: 问诊信息
-            idempotency_key: 幂等键（v2 防重入）；同 key 重复调用返回原 appointment_id
-
-        Returns:
-            appointment_id
+        """创建预约。事务原子性 + 乐观锁 + 幂等性 + 进程级写互斥（v4）。
 
         Raises:
             IdempotencyConflictError: 幂等键已存在但参数不同
             OptimisticLockError: schedule 版本冲突 / 库存不足
         """
+        with _APPT_WRITE_LOCK:
+            return self._create_locked(
+                patient_id=patient_id,
+                doctor_id=doctor_id,
+                schedule_id=schedule_id,
+                expected_schedule_version=expected_schedule_version,
+                symptoms=symptoms,
+                duration=duration,
+                severity=severity,
+                idempotency_key=idempotency_key,
+            )
+
+    def _create_locked(
+        self,
+        patient_id: str,
+        doctor_id: int,
+        schedule_id: int,
+        expected_schedule_version: int | None,
+        symptoms: str,
+        duration: str,
+        severity: str,
+        idempotency_key: str | None,
+    ) -> str:
+        """create 的实际实现（调用方必须已持有 _APPT_WRITE_LOCK）。"""
         # 1. 幂等性检查
         if idempotency_key:
             existing = self.get_by_idempotency_key(idempotency_key)

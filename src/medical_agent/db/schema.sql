@@ -134,3 +134,17 @@ CREATE TABLE IF NOT EXISTS upstream_changes (
 
 CREATE INDEX IF NOT EXISTS idx_upstream_entity ON upstream_changes(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_upstream_applied ON upstream_changes(applied, created_at);
+
+-- 8. 用户表（v4：登录账号体系，一个用户绑定一个患者档案）
+-- 用途：多用户并发测试 / 真实登录态（patient_id 不再由客户端自报）
+CREATE TABLE IF NOT EXISTS users (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    username        TEXT NOT NULL UNIQUE,
+    password_hash   TEXT NOT NULL,               -- sha256(salt + password)，demo 级；生产换 bcrypt
+    salt            TEXT NOT NULL,
+    patient_id      TEXT NOT NULL UNIQUE,
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (patient_id) REFERENCES patients(id) ON UPDATE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_patient ON users(patient_id);
