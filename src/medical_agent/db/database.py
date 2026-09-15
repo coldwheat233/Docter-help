@@ -53,8 +53,17 @@ def init_db(schema_file: Path | None = None) -> None:
 
     conn = get_db()
     conn.executescript(schema_sql)
+    _migrate(conn)
     conn.commit()
     print(f"[OK] database initialized: {get_settings().db_path}")
+
+
+def _migrate(conn) -> None:
+    """轻量迁移：给老库补新增列（CREATE TABLE IF NOT EXISTS 不会改已有表）。"""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+    if cols and "role" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'patient'")
+        print("[migrate] users.role added")
 
 
 if __name__ == "__main__":

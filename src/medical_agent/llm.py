@@ -1,7 +1,8 @@
-"""LLM 工厂：统一返回 ChatDeepSeek + 自动降级到 ChatOpenAI。
+"""LLM 工厂：统一返回 GLM（智谱）或 ChatDeepSeek + 自动降级到 ChatOpenAI。
 
-v3 增强：
-- 主 LLM：ChatDeepSeek（deepseek-chat）
+优先级：
+- 主 LLM：GLM（OpenAI 兼容接口，配了 GLM_API_KEY 就用）
+- 备选主 LLM：ChatDeepSeek（deepseek-chat，GLM 未配置时兜底）
 - 备用 LLM：ChatOpenAI（如有 OPENAI_API_KEY）
 - 自动 fallback：主 LLM 失败/超时时切备用
 - 流式输出支持
@@ -39,33 +40,52 @@ def get_llm(
         ChatDeepSeek 或带 fallback 的包装
     """
     settings = get_settings()
-    api_key = settings.deepseek_api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+    deepseek_key = settings.deepseek_api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+    glm_key = settings.glm_api_key or os.environ.get("GLM_API_KEY", "")
 
     # Mock 模式（测试/CI 用）
     if settings.mock_llm or os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes"):
         return get_mock_llm()
 
-    if not api_key:
+    if not glm_key and not deepseek_key:
         raise RuntimeError(
-            "未设置 DEEPSEEK_API_KEY。\n"
-            "1) 编辑项目根目录的 .env，填入 DEEPSEEK_API_KEY=sk-...\n"
-            "2) 或设系统环境变量 DEEPSEEK_API_KEY"
+            "未设置 GLM_API_KEY 或 DEEPSEEK_API_KEY。\n"
+            "1) 编辑项目根目录的 .env，填入 GLM_API_KEY=...\n"
+            "2) 或设系统环境变量"
         )
 
     # 设置 LangSmith 环境变量（必须在 import langchain 之前）
     _setup_langsmith_env()
 
-    # 主 LLM
-    from langchain_deepseek import ChatDeepSeek
+    if glm_key:
+        from langchain_openai import ChatOpenAI
 
-    primary = ChatDeepSeek(
-        model=model or settings.deepseek_model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        max_retries=2,
-        api_key=api_key,
-        streaming=True,  # 默认启用流式
-    )
+        extra_body: dict = {}
+        if not settings.glm_thinking:
+            # 默认关深度思考：医疗问诊要低延迟首 token
+            extra_body["thinking"] = {"type": "disabled"}
+        primary = ChatOpenAI(
+            model=model or settings.glm_model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            max_retries=2,
+            api_key=glm_key,
+            base_url=settings.glm_base_url,
+            streaming=True,
+            extra_body=extra_body,
+        )
+    else:
+        # GLM 未配置时回退 DeepSeek
+        from langchain_deepseek import ChatDeepSeek
+
+        primary = ChatDeepSeek(
+            model=model or settings.deepseek_model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            max_retries=2,
+            api_key=deepseek_key,
+            streaming=True,  # 默认启用流式
+        )
 
     # 自动降级
     if enable_fallback and settings.openai_api_key:

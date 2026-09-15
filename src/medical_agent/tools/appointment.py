@@ -61,8 +61,25 @@ def _get_state_from_runtime(runtime) -> dict:
         return {}
 
 
+def _is_slot_expired(schedule: dict) -> bool:
+    """排班时间是否已过（日期在过去，或今天但 end_time 已到）。"""
+    from datetime import date as _date
+
+    d = str(schedule.get("schedule_date", ""))
+    if not d:
+        return False
+    today_iso = _date.today().isoformat()
+    if d < today_iso:
+        return True
+    if d == today_iso:
+        end = str(schedule.get("end_time", ""))[:5]
+        if end and end <= datetime.now().strftime("%H:%M"):
+            return True
+    return False
+
+
 def _recheck_schedule(schedule_id: int) -> dict:
-    """落库前 re-check：再查一次排班（防排班已变）。"""
+    """落库前 re-check：再查一次排班（防排班已变 / 时段已过期）。"""
     from medical_agent.db.database import get_db
 
     db = get_db()
@@ -73,6 +90,8 @@ def _recheck_schedule(schedule_id: int) -> dict:
         return {"available": False, "reason": "schedule_disabled"}
     if schedule["remaining"] < 1:
         return {"available": False, "reason": "no_remaining", "remaining": schedule["remaining"]}
+    if _is_slot_expired(schedule):
+        return {"available": False, "reason": "slot_expired"}
     return {
         "available": True,
         "version": schedule["version"],
@@ -183,9 +202,15 @@ def set_appointment(
             hint="LLM 调 set_appointment() 时应从 state 提取；或显式传参",
         )
 
-    # 3. 落库前 re-check（防 HITL 审批中排班变了）
+    # 3. 落库前 re-check（防 HITL 审批中排班变了 / 时段已过期）
     recheck = _recheck_schedule(schedule_id)
     if not recheck["available"]:
+        if recheck["reason"] == "slot_expired":
+            return _error_response(
+                "SLOT_EXPIRED",
+                "该时段就诊时间已过，无法预约。请重新查询可用排班并为用户推荐新的时段",
+                reason="slot_expired",
+            )
         return _error_response(
             "RECHECK_FAILED",
             f"排班 {schedule_id} 当前不可预约：{recheck['reason']}",

@@ -164,6 +164,7 @@ class ScheduleRepository:
         end_date: date,
         time_slot: str | None = None,
         min_remaining: int = 1,
+        include_past: bool = False,
     ) -> list[dict[str, Any]]:
         sql = """
             SELECT
@@ -191,6 +192,11 @@ class ScheduleRepository:
         if time_slot:
             sql += " AND s.time_slot = ?"
             params.append(time_slot)
+        if not include_past:
+            # 当天的排班要求结束时间还没过（患者端永远不该看到已过期的号）
+            now_hhmm = datetime.now().strftime("%H:%M")
+            sql += " AND (s.schedule_date > ? OR (s.schedule_date = ? AND substr(s.end_time,1,5) > ?))"
+            params.extend([start_date.isoformat(), start_date.isoformat(), now_hhmm])
         sql += " ORDER BY s.schedule_date, s.time_slot, d.id"
         cur = self.conn.execute(sql, params)
         return _rows_to_list(cur.fetchall())
@@ -812,12 +818,15 @@ class AppointmentRepository:
             # 3. 退旧 schedule
             ScheduleRepository(self.conn).increment_remaining(old_schedule_id)
 
-            # 4. 更新 appointment
+            # 4. 更新 appointment（doctor_id 同步为新排班的医生，否则查询仍显示旧医生）
             self.conn.execute(
                 """UPDATE appointments
-                   SET schedule_id = ?, schedule_version = ?, updated_at = CURRENT_TIMESTAMP
+                   SET schedule_id = ?,
+                       schedule_version = ?,
+                       doctor_id = (SELECT doctor_id FROM schedules WHERE id = ?),
+                       updated_at = CURRENT_TIMESTAMP
                    WHERE id = ?""",
-                (new_schedule_id, new_version, appointment_id),
+                (new_schedule_id, new_version, new_schedule_id, appointment_id),
             )
 
             # 5. 审计

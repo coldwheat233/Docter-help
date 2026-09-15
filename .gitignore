@@ -72,3 +72,8 @@ Thumbs.db
 
 # Node / React 前端
 node_modules/
+
+# v6: 运行时产物
+uploads/
+test_report.png
+diag_out.log

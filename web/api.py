@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import sys
 import time
@@ -41,7 +42,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -73,6 +74,10 @@ def _warmup() -> None:
     except Exception as e:
         print(f"[warmup] init_db failed: {e}")
     try:
+        _ensure_staff_account()
+    except Exception as e:
+        print(f"[warmup] staff seed failed: {e}")
+    try:
         get_graph_app()
         print(f"[warmup] graph compiled ({time.time() - t0:.1f}s)")
     except Exception as e:
@@ -86,6 +91,28 @@ def _warmup() -> None:
         print(f"[warmup] embedder loaded ({time.time() - t1:.1f}s)")
     except Exception as e:
         print(f"[warmup] embedder preload skipped: {e}")
+
+
+def _ensure_staff_account() -> None:
+    """demo 环境自动补一个业务中台账号（无 staff 时创建）。生产应由 IdP 管理。"""
+    from medical_agent.db.database import get_db
+    from medical_agent.db.repositories import PatientRepository
+
+    db = get_db()
+    if db.execute("SELECT 1 FROM users WHERE role = 'staff' LIMIT 1").fetchone():
+        return
+    username, password = "staff", "Staff123456"
+    if db.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+        return
+    synthetic_pid = "STAFF-OPS-001"  # staff 不代表患者，仅满足 FK
+    PatientRepository(db).upsert(synthetic_pid, "门诊运营（中台）", "")
+    salt = secrets.token_hex(8)
+    db.execute(
+        "INSERT INTO users (username, password_hash, salt, patient_id, role) VALUES (?, ?, ?, ?, 'staff')",
+        (username, _hash_password(password, salt), salt, synthetic_pid),
+    )
+    db.commit()
+    print(f"[warmup] demo staff account created: {username} / {password}")
 
 
 @asynccontextmanager
@@ -190,14 +217,33 @@ def _hash_password(password: str, salt: str) -> str:
 
 
 def _resolve_patient_id(token: str | None, fallback: str) -> tuple[str, str | None]:
-    """token → patient_id。返回 (patient_id, error)。"""
+    """token → patient_id。返回 (patient_id, error)。staff 账号不能走患者接口。"""
     if token:
-        with _sessions_lock:
-            pid = _sessions.get(token)
-        if pid:
-            return pid, None
-        return fallback, "token 无效或已过期，请重新登录"
+        sess = _get_session(token)
+        if sess is None:
+            return fallback, "token 无效或已过期，请重新登录"
+        if sess.get("role") == "staff":
+            return "", "这是业务中台账号，请使用患者账号登录"
+        return sess["patient_id"], None
     return fallback, None
+
+
+def _get_session(token: str) -> dict | None:
+    with _sessions_lock:
+        sess = _sessions.get(token)
+    return dict(sess) if sess else None
+
+
+def _staff_session(token: str | None, request: Request) -> dict | None:
+    """中台鉴权：staff 登录 token 或 X-Admin-Token（运维）。通过返回身份，否则 None。"""
+    if token:
+        sess = _get_session(token)
+        if sess and sess.get("role") == "staff":
+            return {"role": "staff", "name": sess.get("name", "staff")}
+    admin_token = os.environ.get("MEDICAL_ADMIN_TOKEN", "")
+    if admin_token and request.headers.get("X-Admin-Token") == admin_token:
+        return {"role": "admin", "name": "admin"}
+    return None
 
 
 class RegisterRequest(BaseModel):
@@ -236,8 +282,8 @@ def register(req: RegisterRequest, request: Request) -> Any:
 
     token = secrets.token_urlsafe(24)
     with _sessions_lock:
-        _sessions[token] = patient_id
-    return {"token": token, "patient_id": patient_id, "name": req.name}
+        _sessions[token] = {"patient_id": patient_id, "name": req.name, "role": "patient"}
+    return {"token": token, "patient_id": patient_id, "name": req.name, "role": "patient"}
 
 
 @app.post("/api/login")
@@ -249,7 +295,7 @@ def login(req: LoginRequest, request: Request) -> Any:
 
     db = get_db()
     row = db.execute(
-        """SELECT u.password_hash, u.salt, u.patient_id, p.name
+        """SELECT u.password_hash, u.salt, u.patient_id, p.name, COALESCE(u.role, 'patient') AS role
            FROM users u LEFT JOIN patients p ON p.id = u.patient_id
            WHERE u.username = ?""",
         (req.username,),
@@ -257,10 +303,16 @@ def login(req: LoginRequest, request: Request) -> Any:
     if not row or row["password_hash"] != _hash_password(req.password, row["salt"]):
         return JSONResponse(status_code=401, content={"detail": "用户名或密码错误"})
 
+    role = row["role"] or "patient"
     token = secrets.token_urlsafe(24)
     with _sessions_lock:
-        _sessions[token] = row["patient_id"]
-    return {"token": token, "patient_id": row["patient_id"], "name": row["name"] or req.username}
+        _sessions[token] = {"patient_id": row["patient_id"], "name": row["name"] or req.username, "role": role}
+    return {
+        "token": token,
+        "patient_id": row["patient_id"],
+        "name": row["name"] or req.username,
+        "role": role,
+    }
 
 
 # =====================================================================
@@ -596,6 +648,117 @@ def list_appointments(patient_id: str = "P20240001", token: str | None = None) -
     return json.loads(query_my_appointments.func(runtime=_RT(), limit=20))
 
 
+# =====================================================================
+# 排班可视化（患者直选，v6）
+# =====================================================================
+class SelectSlotRequest(BaseModel):
+    thread_id: str | None = None
+    schedule_id: int
+    token: str | None = None
+
+
+@app.get("/api/schedules")
+def list_schedules(
+    token: str | None = None, department: str | None = None, days: int = 7
+) -> Any:
+    """未过期排班查询（患者排班面板用）。只含今天起、结束时间未过的时段。"""
+    pid, auth_err = _resolve_patient_id(token, "")
+    if auth_err or not pid:
+        return JSONResponse(status_code=401, content={"detail": auth_err or "请先登录"})
+
+    from datetime import date, timedelta
+
+    from medical_agent.db.database import get_db
+    from medical_agent.db.repositories import DepartmentRepository, ScheduleRepository
+
+    days = max(1, min(days, 14))
+    db = get_db()
+    today = date.today()
+    departments = [d["name"] for d in DepartmentRepository(db).list_all()]
+    if department:
+        departments = [department] if department in departments else []
+    repo = ScheduleRepository(db)
+    out: list[dict[str, Any]] = []
+    for dept in departments:
+        out.extend(
+            repo.find_available(
+                department=dept, start_date=today, end_date=today + timedelta(days=days - 1)
+            )
+        )
+    out.sort(key=lambda x: (x["schedule_date"], x["start_time"], x["department"], x["doctor_name"]))
+    return {"days": days, "count": len(out), "schedules": out}
+
+
+@app.post("/api/select-slot")
+def select_slot_api(req: SelectSlotRequest) -> Any:
+    """患者从排班面板直选时段：写入 thread state 的 selected_slot，
+    之后患者在对话里发确认消息即可进入既有 confirmer → HITL 审批链路。"""
+    pid, auth_err = _resolve_patient_id(req.token, "")
+    if auth_err or not pid:
+        return JSONResponse(status_code=401, content={"detail": auth_err or "请先登录"})
+
+    from medical_agent.db.database import get_db
+    from medical_agent.db.repositories import DoctorRepository, ScheduleRepository
+    from medical_agent.tools.appointment import _recheck_schedule
+
+    recheck = _recheck_schedule(req.schedule_id)
+    if not recheck["available"]:
+        if recheck["reason"] == "slot_expired":
+            detail = "该时段就诊时间已过，请选择其他时段"
+        elif recheck["reason"] == "no_remaining":
+            detail = "该时段号源已约满，请选择其他时段"
+        else:
+            detail = f"该时段当前不可约（{recheck['reason']}）"
+        return JSONResponse(status_code=409, content={"detail": detail, "reason": recheck["reason"]})
+
+    db = get_db()
+    s = ScheduleRepository(db).get_by_id(req.schedule_id)
+    doctor = DoctorRepository(db).get_by_id(s["doctor_id"]) or {}
+    slot: dict[str, Any] = {
+        "schedule_id": s["id"],
+        "doctor_id": s["doctor_id"],
+        "schedule_version": s["version"],
+        "schedule_date": s["schedule_date"],
+        "time_slot": s["time_slot"],
+        "start_time": s["start_time"],
+        "end_time": s["end_time"],
+        "doctor_name": doctor.get("name", ""),
+        "doctor_title": doctor.get("title", ""),
+        "department": doctor.get("department", ""),
+    }
+    thread_id = req.thread_id or f"web-{uuid.uuid4().hex[:12]}"
+    graph_app = get_graph_app()
+    # 关键：把选中时段同时写进消息历史 —— confirmer LLM 只能看到 messages，
+    # 只写 selected_slot 它会当没发生过，自己瞎查排班甚至死循环
+    from langchain_core.messages import AIMessage
+
+    slot_desc = (
+        f"已为患者选定时段：{slot['schedule_date']} {slot['start_time']}-{slot['end_time']} "
+        f"{slot['doctor_name']}（{slot['doctor_title']}，{slot['department']}），"
+        f"患者即将确认，请直接调用 set_appointment() 落库（参数自动从 state 提取）。"
+    )
+    graph_app.update_state(
+        _config(thread_id),
+        values={
+            "patient_id": pid,
+            "selected_slot": slot,
+            "current_step": "confirm",
+            "messages": [AIMessage(content=slot_desc, name="scheduler_agent")],
+        },
+    )
+    return {
+        "success": True,
+        "thread_id": thread_id,
+        "selected": {
+            "date": s["schedule_date"],
+            "time": f"{s['start_time']}-{s['end_time']}",
+            "department": doctor.get("department", ""),
+            "doctor": doctor.get("name", ""),
+        },
+        "next": "请在对话中发送确认消息（如「确认预约」）以继续",
+    }
+
+
 @app.get("/api/appointments/{appointment_id}")
 def appointment_detail(appointment_id: str, patient_id: str = "P20240001", token: str | None = None) -> Any:
     pid, auth_err = _resolve_patient_id(token, patient_id)
@@ -617,6 +780,347 @@ def departments() -> dict:
     return {"departments": DepartmentRepository(get_db()).list_all()}
 
 
+# =====================================================================
+# 多模态：病历资料上传（GLM-4V 抽取 + PII 打码，v6）
+# =====================================================================
+@app.post("/api/upload")
+async def upload_document(
+    request: Request,
+    token: str | None = None,
+    thread_id: str | None = None,
+    file: UploadFile | None = File(default=None),
+) -> Any:
+    """上传检查报告/病历照片 → GLM-4V 结构化抽取 → 入库；可选写入对话线程。"""
+    pid, auth_err = _resolve_patient_id(token, "")
+    if auth_err or not pid:
+        return JSONResponse(status_code=401, content={"detail": auth_err or "请先登录"})
+
+    from medical_agent.db.repositories import _APPT_WRITE_LOCK
+    from medical_agent.vision import ALLOWED_MIME, MAX_UPLOAD_BYTES, extract_document
+
+    if file is None:
+        return JSONResponse(status_code=400, content={"detail": "缺少文件"})
+    mime = (file.content_type or "").lower()
+    if mime not in ALLOWED_MIME:
+        return JSONResponse(
+            status_code=415,
+            content={"detail": "仅支持 jpg/png/webp 图片（PDF 请先截图上传）"},
+        )
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        return JSONResponse(status_code=413, content={"detail": "文件超过 5MB，请压缩后上传"})
+
+    # 落盘（留原始凭证；生产应放对象存储）
+    import uuid as _uuid
+
+    ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(mime, ".bin")
+    upload_dir = PROJECT_ROOT / "data" / "uploads" / pid
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    stored_name = f"{_uuid.uuid4().hex}{ext}"
+    (upload_dir / stored_name).write_bytes(data)
+
+    # GLM-4V 抽取（失败不阻塞上传，降级为'待人工识别'）
+    try:
+        extracted = extract_document(data, mime)
+    except Exception as e:
+        print(f"[upload] extract failed: {e}")
+        extracted = {
+            "doc_type": "其他",
+            "title": file.filename or "未命名资料",
+            "summary": "自动识别失败，已保存原图等待人工查看",
+            "symptoms": "",
+            "key_fields": [],
+            "suggested_department": "",
+            "urgent": False,
+        }
+
+    from medical_agent.db.database import get_db
+
+    db = get_db()
+    with _APPT_WRITE_LOCK:
+        cur = db.execute(
+            """INSERT INTO patient_documents
+               (patient_id, filename, mime_type, size_bytes, doc_type, title, summary, extracted_json, urgent)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                pid,
+                file.filename or stored_name,
+                mime,
+                len(data),
+                extracted.get("doc_type", "其他"),
+                extracted.get("title", ""),
+                extracted.get("summary", ""),
+                json.dumps(extracted, ensure_ascii=False),
+                1 if extracted.get("urgent") else 0,
+            ),
+        )
+        db.commit()
+        doc_id = cur.lastrowid
+
+    # 写进对话线程（若有）：让问诊抽取能看到资料内容
+    if thread_id:
+        from langchain_core.messages import AIMessage
+
+        bits = [f"📎 患者上传了{extracted.get('doc_type', '资料')}：《{extracted.get('title') or file.filename}》"]
+        if extracted.get("summary"):
+            bits.append(f"摘要：{extracted['summary']}")
+        if extracted.get("symptoms"):
+            bits.append(f"主诉：{extracted['symptoms']}")
+        if extracted.get("suggested_department"):
+            bits.append(f"建议科室：{extracted['suggested_department']}")
+        try:
+            get_graph_app().update_state(
+                _config(thread_id),
+                values={"messages": [AIMessage(content="\n".join(bits), name="document_agent")]},
+            )
+        except Exception as e:
+            print(f"[upload] thread message skipped: {e}")
+
+    return {"success": True, "document_id": doc_id, **extracted}
+
+
+@app.get("/api/documents")
+def list_documents(patient_id: str = "", token: str | None = None) -> Any:
+    pid, auth_err = _resolve_patient_id(token, patient_id)
+    if auth_err:
+        return JSONResponse(status_code=401, content={"detail": auth_err})
+    from medical_agent.db.database import get_db
+
+    db = get_db()
+    rows = db.execute(
+        """SELECT id, doc_type, title, summary, urgent, created_at
+           FROM patient_documents WHERE patient_id = ? ORDER BY created_at DESC LIMIT 20""",
+        (pid,),
+    ).fetchall()
+    docs = [
+        {
+            "id": r["id"],
+            "doc_type": r["doc_type"],
+            "title": r["title"],
+            "summary": r["summary"],
+            "urgent": bool(r["urgent"]),
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]
+    return {"count": len(docs), "documents": docs}
+
+
+# =====================================================================
+# 就诊摘要（v6：聚合历史 + 病历资料 → 辅助摘要，非诊断）
+# =====================================================================
+_SUMMARY_CACHE: dict[str, tuple[float, str]] = {}
+_SUMMARY_TTL = 600.0
+
+
+@app.get("/api/summary")
+def medical_summary(token: str | None = None, refresh: int = 0) -> Any:
+    pid, auth_err = _resolve_patient_id(token, "")
+    if auth_err or not pid:
+        return JSONResponse(status_code=401, content={"detail": auth_err or "请先登录"})
+
+    cached = _SUMMARY_CACHE.get(pid)
+    if not refresh and cached and time.time() - cached[0] < _SUMMARY_TTL:
+        return {"summary": cached[1], "cached": True}
+
+    from medical_agent.db.database import get_db
+    from medical_agent.tools.appointment_query import query_my_appointments
+
+    class _RT:
+        state = {"patient_id": pid}
+
+    appts = json.loads(query_my_appointments.func(runtime=_RT(), limit=30))
+    db = get_db()
+    doc_rows = db.execute(
+        """SELECT doc_type, title, summary, created_at FROM patient_documents
+           WHERE patient_id = ? ORDER BY created_at DESC LIMIT 20""",
+        (pid,),
+    ).fetchall()
+
+    hist_lines = [
+        f"- {a.get('schedule_date', '')} {a.get('department', '')} {a.get('doctor_name', '')}"
+        f"（{a.get('status', '')}）主诉：{a.get('symptoms') or '未记录'}"
+        for a in appts.get("appointments", [])
+    ]
+    doc_lines = [
+        f"- {r['created_at'][:10]} {r['doc_type']}《{r['title']}》{r['summary']}"
+        for r in doc_rows
+    ]
+    if not hist_lines and not doc_lines:
+        return {
+            "summary": "暂无历史预约和病历资料。完成一次预约或上传检查报告后，这里会自动生成就诊摘要。",
+            "empty": True,
+        }
+
+    from langchain_core.messages import HumanMessage
+
+    from medical_agent.llm import get_llm
+
+    prompt = (
+        "你是门诊接诊助手。根据患者的既往就诊记录和病历资料，写一份给接诊医生快速浏览的就诊摘要。\n"
+        "要求：① 100 字以内，分条陈述；② 只归纳已有信息，不下诊断、不给治疗建议、不编造；"
+        "③ 如有重复出现的症状或异常指标，指出来供医生关注。\n\n"
+        "既往就诊：\n" + ("\n".join(hist_lines) or "无") + "\n\n病历资料：\n" + ("\n".join(doc_lines) or "无")
+    )
+    try:
+        resp = get_llm(max_tokens=400).invoke([HumanMessage(content=prompt)])
+        text = (resp.content or "").strip() or "摘要生成失败，请稍后重试"
+    except Exception as e:
+        print(f"[summary] llm failed: {e}")
+        text = "摘要生成暂时不可用，请稍后重试。"
+    _SUMMARY_CACHE[pid] = (time.time(), text)
+    return {"summary": text}
+
+
+# =====================================================================
+# 患者直操：取消 / 改约（v6，预约卡按钮）
+# =====================================================================
+class PatientCancelRequest(BaseModel):
+    reason: str = "个人原因取消"
+
+
+def _load_owned_appointment(appointment_id: str, pid: str):
+    """返回 (appt_dict, error_response)。校验存在性与归属。"""
+    from medical_agent.db.database import get_db
+    from medical_agent.db.repositories import AppointmentRepository
+
+    db = get_db()
+    appt = AppointmentRepository(db).get_by_id(appointment_id)
+    if appt is None:
+        return None, JSONResponse(status_code=404, content={"detail": "预约不存在"})
+    if appt["patient_id"] != pid:
+        return None, JSONResponse(status_code=403, content={"detail": "无权操作他人预约"})
+    return appt, None
+
+
+@app.post("/api/appointments/{appointment_id}/cancel")
+def patient_cancel_appointment(
+    appointment_id: str, req: PatientCancelRequest, token: str | None = None
+) -> Any:
+    """患者主动取消自己的预约（即时生效，审计 actor=patient）。"""
+    pid, auth_err = _resolve_patient_id(token, "")
+    if auth_err or not pid:
+        return JSONResponse(status_code=401, content={"detail": auth_err or "请先登录"})
+
+    appt, err = _load_owned_appointment(appointment_id, pid)
+    if err:
+        return err
+    if appt["status"] not in ("pending", "confirmed"):
+        return JSONResponse(
+            status_code=409,
+            content={"detail": f"当前状态（{appt['status']}）不可取消"},
+        )
+
+    from medical_agent.db.database import get_db
+    from medical_agent.db.repositories import _APPT_WRITE_LOCK, AppointmentRepository
+
+    db = get_db()
+    with _APPT_WRITE_LOCK:
+        AppointmentRepository(db).update_status(
+            appointment_id,
+            "cancelled",
+            cancelled_reason=req.reason or "患者主动取消",
+            actor=f"patient:{pid}",
+        )
+    return {"success": True, "appointment_id": appointment_id, "status": "cancelled"}
+
+
+class PatientRescheduleRequest(BaseModel):
+    new_schedule_id: int
+
+
+@app.post("/api/appointments/{appointment_id}/reschedule")
+def patient_reschedule_appointment(
+    appointment_id: str, req: PatientRescheduleRequest, token: str | None = None
+) -> Any:
+    """患者改约自己的预约到新时段（乐观锁 + 过期校验 + 审计）。"""
+    pid, auth_err = _resolve_patient_id(token, "")
+    if auth_err or not pid:
+        return JSONResponse(status_code=401, content={"detail": auth_err or "请先登录"})
+
+    appt, err = _load_owned_appointment(appointment_id, pid)
+    if err:
+        return err
+    if appt["status"] != "confirmed":
+        return JSONResponse(
+            status_code=409,
+            content={"detail": f"当前状态（{appt['status']}）不支持改约，仅已确认的预约可改约"},
+        )
+
+    from medical_agent.db.database import get_db
+    from medical_agent.db.repositories import (
+        _APPT_WRITE_LOCK,
+        AppointmentRepository,
+        DoctorRepository,
+        ScheduleRepository,
+    )
+    from medical_agent.tools.appointment import _recheck_schedule
+
+    recheck = _recheck_schedule(req.new_schedule_id)
+    if not recheck["available"]:
+        detail = (
+            "新时段就诊时间已过，请重新选择"
+            if recheck["reason"] == "slot_expired"
+            else f"新时段当前不可约（{recheck['reason']}）"
+        )
+        return JSONResponse(status_code=409, content={"detail": detail, "reason": recheck["reason"]})
+
+    db = get_db()
+    try:
+        with _APPT_WRITE_LOCK:
+            AppointmentRepository(db).update_schedule(
+                appointment_id=appointment_id,
+                new_schedule_id=req.new_schedule_id,
+                actor=f"patient:{pid}",
+            )
+    except Exception as e:  # OptimisticLockError / RepositoryError
+        return JSONResponse(status_code=409, content={"detail": f"改约失败：{e}"})
+
+    s = ScheduleRepository(db).get_by_id(req.new_schedule_id) or {}
+    doctor = DoctorRepository(db).get_by_id(s.get("doctor_id")) or {}
+    return {
+        "success": True,
+        "appointment_id": appointment_id,
+        "schedule": {
+            "date": s.get("schedule_date", ""),
+            "time": f"{s.get('start_time', '')}-{s.get('end_time', '')}",
+            "department": doctor.get("department", ""),
+            "doctor": doctor.get("name", ""),
+        },
+    }
+
+
+# =====================================================================
+# 运行指标（v6：demo 可观测）
+# =====================================================================
+_STARTED_AT = time.time()
+
+
+@app.get("/api/metrics")
+def metrics() -> dict:
+    from medical_agent.global_limiter import get_combined_limiter
+    from medical_agent.resilience import get_llm_circuit
+
+    circuit = get_llm_circuit()
+    with _security_lock:
+        banned_count = sum(1 for until in _blacklist.values() if until > time.time())
+    return {
+        "uptime_seconds": int(time.time() - _STARTED_AT),
+        "active_sessions": len(_sessions),
+        "llm_circuit": {
+            "state": circuit.state,
+            "failure_count": getattr(circuit, "failure_count", None),
+            "failure_threshold": getattr(circuit, "failure_threshold", None),
+        },
+        "rate_limit": {
+            "per_ip": _ip_limiter.stats(),
+            "global": get_combined_limiter().stats(),
+            "banned_ips": banned_count,
+        },
+        "mock_llm": os.environ.get("MOCK_LLM", "").lower() in ("true", "1", "yes"),
+    }
+
+
 @app.get("/api/security/stats")
 def security_stats() -> dict:
     """限流/黑名单运行状态（demo 可观测用）。"""
@@ -629,6 +1133,266 @@ def security_stats() -> dict:
         "global": get_combined_limiter().stats(),
         "banned_ips": banned,
     }
+
+
+# =====================================================================
+# 业务中台（staff 视角，v6）：审批队列 + 排班/预约管理 + 审计
+# =====================================================================
+def _guard_staff(request: Request, token: str | None) -> JSONResponse | None:
+    if _staff_session(token, request) is None:
+        return JSONResponse(status_code=403, content={"detail": "需要业务中台权限（staff 账号或 X-Admin-Token）"})
+    return None
+
+
+@app.get("/api/admin/approvals")
+def admin_approvals(request: Request, token: str | None = None) -> Any:
+    """全局待审批队列：扫描 checkpointer 里的活跃线程，收集停在人工审批点的申请。"""
+    guard = _guard_staff(request, token)
+    if guard:
+        return guard
+    items = _scan_pending_approvals()
+    return {"count": len(items), "approvals": items}
+
+
+def _scan_pending_approvals(limit: int = 200) -> list[dict[str, Any]]:
+    """扫描所有线程的人工审批点（REST 与 SSE 流共用）。"""
+    graph_app = get_graph_app()
+    from medical_agent.db.database import get_db
+
+    db = get_db()
+    items, seen = [], set()
+    try:
+        checkpoint_iter = graph_app.checkpointer.list(None, limit=limit)
+    except Exception:
+        checkpoint_iter = []
+    for tup in checkpoint_iter:
+        try:
+            tid = tup.config["configurable"]["thread_id"]
+        except Exception:
+            continue
+        if tid in seen:
+            continue
+        seen.add(tid)
+        try:
+            snap = graph_app.get_state(_config(tid))
+        except Exception:
+            continue
+        for task in getattr(snap, "tasks", []) or []:
+            intrs = getattr(task, "interrupts", None) or []
+            if not intrs:
+                continue
+            payload = getattr(intrs[0], "value", None)
+            if not isinstance(payload, dict):
+                continue
+            pid = payload.get("patient_id", "")
+            prow = db.execute("SELECT name, phone FROM patients WHERE id = ?", (pid,)).fetchone()
+            items.append(
+                {
+                    "thread_id": tid,
+                    "type": payload.get("type", ""),
+                    "action": payload.get("action", ""),
+                    "patient_id": pid,
+                    "patient_name": (prow["name"] if prow else "") or pid,
+                    "patient_phone": (prow["phone"] if prow else "") or "",
+                    "schedule_date": payload.get("schedule_date", ""),
+                    "time_slot": payload.get("time_slot", ""),
+                    "doctor_id": payload.get("doctor_id"),
+                    "symptoms": payload.get("symptoms", ""),
+                    "duration": payload.get("duration", ""),
+                    "severity": payload.get("severity", ""),
+                    "ask": payload.get("ask", ""),
+                }
+            )
+            break
+    return items
+
+
+@app.get("/api/admin/approvals/stream")
+def admin_approvals_stream(request: Request, token: str | None = None) -> Any:
+    """SSE：中台审批队列实时流。队列指纹变化时推全量快照，无变化时发心跳。"""
+    guard = _guard_staff(request, token)
+    if guard:
+        return guard
+
+    def _gen():
+        last_fp = None
+        polls = 0
+        while True:
+            try:
+                items = _scan_pending_approvals()
+                fp = json.dumps([(i["thread_id"], i["type"]) for i in items], ensure_ascii=False)
+                if fp != last_fp:
+                    last_fp = fp
+                    yield _sse("approvals", {"count": len(items), "approvals": items})
+            except Exception as e:
+                yield _sse("error", {"detail": f"scan failed: {e}"})
+                return
+            polls += 1
+            if polls % 8 == 0:
+                yield ": ping\n\n"  # 保活，防代理断连
+            time.sleep(2.5)
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+class AdminDecisionRequest(BaseModel):
+    thread_id: str
+    decision: str  # "approve" | "reject:原因"
+
+
+@app.get("/api/threads/{thread_id}/status")
+def thread_status(thread_id: str, token: str | None = None, since: int = 0) -> Any:
+    """患者轮询自己线程的状态：新消息 + 是否仍有待审批。
+
+    中台处理后患者端据此自动更新（审批结果消息随线程返回）。"""
+    pid, auth_err = _resolve_patient_id(token, "")
+    if auth_err or not pid:
+        return JSONResponse(status_code=401, content={"detail": auth_err or "请先登录"})
+
+    graph_app = get_graph_app()
+    try:
+        snap = graph_app.get_state(_config(thread_id))
+    except Exception:
+        return JSONResponse(status_code=404, content={"detail": "会话不存在"})
+
+    values = snap.values or {}
+    # 会话归属校验：只能看自己的线程
+    if values.get("patient_id") and values["patient_id"] != pid:
+        return JSONResponse(status_code=403, content={"detail": "无权查看该会话"})
+
+    msgs = _sanitize_messages(_new_messages(graph_app, thread_id, max(0, since)))
+    pending = _pending_approval(graph_app, thread_id)
+    return {
+        "thread_id": thread_id,
+        "msg_count": len(values.get("messages", [])),
+        "messages": msgs,
+        "pending_approval": pending,
+    }
+
+
+@app.post("/api/admin/approvals/decision")
+def admin_decide(req: AdminDecisionRequest, request: Request, token: str | None = None) -> Any:
+    """中台处理申请：通过 / 驳回（带原因）。等价于患者侧 /api/approve，入口换成 staff。"""
+    guard = _guard_staff(request, token)
+    if guard:
+        return guard
+
+    from medical_agent.graphs.hitl import resume_with_decision
+
+    graph_app = get_graph_app()
+    before = _msg_count(graph_app, req.thread_id)
+    resume_with_decision(graph_app, _config(req.thread_id), req.decision)
+    return {
+        "success": True,
+        "thread_id": req.thread_id,
+        "messages": _sanitize_messages(_new_messages(graph_app, req.thread_id, before)),
+        "pending_approval": _pending_approval(graph_app, req.thread_id),
+    }
+
+
+@app.get("/api/admin/stats")
+def admin_stats(request: Request, token: str | None = None) -> Any:
+    guard = _guard_staff(request, token)
+    if guard:
+        return guard
+    from medical_agent.admin_tools import admin_stats_today
+
+    return admin_stats_today()
+
+
+@app.get("/api/admin/audit")
+def admin_audit(request: Request, limit: int = 30, token: str | None = None) -> Any:
+    guard = _guard_staff(request, token)
+    if guard:
+        return guard
+    from medical_agent.admin_tools import admin_recent_audit_log
+
+    return {"audit": admin_recent_audit_log(limit=max(1, min(limit, 200)))}
+
+
+class AdminScheduleRequest(BaseModel):
+    doctor_id: int
+    schedule_date: str  # YYYY-MM-DD
+    time_slot: str  # morning/afternoon/evening
+    capacity: int = 20
+
+
+@app.post("/api/admin/schedules")
+def admin_create_schedule_route(req: AdminScheduleRequest, request: Request, token: str | None = None) -> Any:
+    guard = _guard_staff(request, token)
+    if guard:
+        return guard
+    from medical_agent.admin_tools import admin_create_schedule
+
+    return admin_create_schedule(
+        doctor_id=req.doctor_id,
+        schedule_date=req.schedule_date,
+        time_slot=req.time_slot,
+        capacity=req.capacity,
+    )
+
+
+class AdminScheduleOpRequest(BaseModel):
+    reason: str = ""
+    new_capacity: int = 0
+
+
+@app.post("/api/admin/schedules/{schedule_id}/{op}")
+def admin_schedule_op(schedule_id: int, op: str, req: AdminScheduleOpRequest, request: Request, token: str | None = None) -> Any:
+    """op ∈ cancel / restore / capacity。"""
+    guard = _guard_staff(request, token)
+    if guard:
+        return guard
+    from medical_agent.admin_tools import (
+        admin_adjust_capacity,
+        admin_cancel_schedule,
+        admin_restore_schedule,
+    )
+
+    if op == "cancel":
+        return admin_cancel_schedule(schedule_id, reason=req.reason or "中台停用")
+    if op == "restore":
+        return admin_restore_schedule(schedule_id)
+    if op == "capacity":
+        if req.new_capacity <= 0:
+            return {"success": False, "error_message": "new_capacity 必须 > 0"}
+        return admin_adjust_capacity(schedule_id, new_capacity=req.new_capacity)
+    return JSONResponse(status_code=404, content={"detail": f"未知操作 {op}"})
+
+
+class AdminDoctorRequest(BaseModel):
+    name: str
+    department: str
+    title: str = "主治医师"
+    specialty: str = ""
+
+
+@app.post("/api/admin/doctors")
+def admin_create_doctor_route(req: AdminDoctorRequest, request: Request, token: str | None = None) -> Any:
+    guard = _guard_staff(request, token)
+    if guard:
+        return guard
+    from medical_agent.admin_tools import admin_create_doctor
+
+    return admin_create_doctor(name=req.name, department=req.department, title=req.title, specialty=req.specialty)
+
+
+class AdminCancelApptRequest(BaseModel):
+    reason: str = ""
+
+
+@app.post("/api/admin/appointments/{appointment_id}/cancel")
+def admin_cancel_appointment_route(appointment_id: str, req: AdminCancelApptRequest, request: Request, token: str | None = None) -> Any:
+    guard = _guard_staff(request, token)
+    if guard:
+        return guard
+    from medical_agent.admin_tools import admin_cancel_appointment
+
+    return admin_cancel_appointment(appointment_id, reason=req.reason or "中台取消")
 
 
 @app.post("/api/security/unban")

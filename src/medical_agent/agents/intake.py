@@ -171,7 +171,9 @@ def build_intake_node():
         emit_progress("📝 正在整理问诊信息…")  # 节点开始就发，不等 LLM 返回
 
         llm = get_llm(max_tokens=512)  # 结构化抽取输出很短，限制 token 提速
-        extractor = llm.with_structured_output(IntakeExtraction)
+        # 必须用 function_calling：GLM 不支持 json_schema response_format，
+        # 新版 OpenAI SDK 会把模型的纯文本回复当增量 JSON 解析而报错
+        extractor = llm.with_structured_output(IntakeExtraction, method="function_calling")
 
         # 拼对话历史（最近 12 条够用）
         history = []
@@ -206,7 +208,15 @@ def build_intake_node():
         if update.get("symptoms"):
             update["current_step"] = "schedule"
 
-        update["messages"] = [AIMessage(content=result.reply_to_user, name=INTAKE_AGENT_NAME)]
+        # GLM 偶发返回空白回复（如单个换行），兜底一句，避免前端出现空气泡
+        reply = (result.reply_to_user or "").strip()
+        if not reply:
+            if update.get("symptoms") or state.get("symptoms"):
+                reply = "好的，信息已记录，接下来为您推荐时段。"
+            else:
+                reply = "请问您哪里不舒服？症状持续多久了？严重程度如何？"
+
+        update["messages"] = [AIMessage(content=reply, name=INTAKE_AGENT_NAME)]
         return update
 
     return intake_node

@@ -143,8 +143,27 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash   TEXT NOT NULL,               -- sha256(salt + password)，demo 级；生产换 bcrypt
     salt            TEXT NOT NULL,
     patient_id      TEXT NOT NULL UNIQUE,
+    role            TEXT NOT NULL DEFAULT 'patient',  -- v6: patient / staff（业务中台）
     created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (patient_id) REFERENCES patients(id) ON UPDATE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_patient ON users(patient_id);
+
+-- 9. 患者病历资料（v6：多模态上传 + GLM-4V 结构化抽取）
+CREATE TABLE IF NOT EXISTS patient_documents (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    patient_id      TEXT NOT NULL,
+    filename        TEXT NOT NULL,
+    mime_type       TEXT NOT NULL DEFAULT '',
+    size_bytes      INTEGER NOT NULL DEFAULT 0,
+    doc_type        TEXT NOT NULL DEFAULT '其他',
+    title           TEXT NOT NULL DEFAULT '',
+    summary         TEXT NOT NULL DEFAULT '',
+    extracted_json  TEXT NOT NULL DEFAULT '{}',
+    urgent          INTEGER NOT NULL DEFAULT 0,
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (patient_id) REFERENCES patients(id) ON UPDATE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_documents_patient ON patient_documents(patient_id);

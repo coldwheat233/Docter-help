@@ -179,7 +179,7 @@ def route_after_merge(state: AppointmentState) -> str:
         return "supervisor"
 
     # 查预约记录 → confirmer（持有 query_my_appointments）
-    if any(k in last_user for k in ("我的预约", "预约记录", "预约过吗", "约了哪些")):
+    if any(k in last_user for k in ("我的预约", "预约记录", "预约过吗", "约了哪些", "有什么预约", "查询预约", "查看预约", "查一下预约")):
         return "confirmer_direct"
 
     # 会话级意图（merge_state 维护：明确信号才切换，否则沿用历史意图）
@@ -191,17 +191,78 @@ def route_after_merge(state: AppointmentState) -> str:
 
     if intent == "book":
         if selected and _is_confirmation_message(last_user):
-            return "confirmer_direct"
+            return "confirm_book_direct"  # v6：确定性落库，不赌 LLM 调工具
         if not state.get("symptoms"):
             return "intake_direct"
         if not selected:
             return "scheduler_direct"
         return "confirmer_direct"
 
+
     if intent == "consult":
         return "knowledge_direct"
 
     return "supervisor"  # unknown / 模糊 → LLM Supervisor 兜底
+
+
+# 确定性预约确认节点（v6）：患者已在 UI 选定时段并明确确认后，
+# 落库不再赌 LLM 会不会调 set_appointment（GLM 实测会照抄 prompt 里的示例
+# 假装"预约成功"而不调工具）——直接代码调工具，interrupt HITL 机制保持不变
+class _StateRuntime:
+    """把 state 包成工具期待的 runtime。"""
+
+    def __init__(self, state: dict):
+        self.state = state
+
+
+def build_confirm_book_node():
+    """确定性落库节点：selected_slot + 用户确认 → set_appointment（内部 HITL interrupt）。"""
+
+    def confirm_book_node(state: AppointmentState) -> dict:
+        import json as _json
+
+        from langchain_core.messages import AIMessage
+
+        from medical_agent.tools.appointment import set_appointment
+
+        selected = state.get("selected_slot") or {}
+        result_json = set_appointment.func(runtime=_StateRuntime(state))
+        try:
+            result = _json.loads(result_json)
+        except Exception:
+            result = {"success": False, "error_message": str(result_json)[:200]}
+
+        when = f"{selected.get('schedule_date', '')} {selected.get('start_time', '')}-{selected.get('end_time', '')}"
+        doctor = f"{selected.get('doctor_name', '')}（{selected.get('doctor_title', '')}，{selected.get('department', '')}）"
+
+        if result.get("success"):
+            content = (
+                f"✅ 预约成功！预约号 {result.get('appointment_id')}\n"
+                f"科室：{selected.get('department', '')}\n"
+                f"医生：{doctor}\n"
+                f"时间：{when}"
+            )
+            return {
+                "messages": [AIMessage(content=content, name="confirmer_agent")],
+                "appointment_id": result.get("appointment_id"),
+                "selected_slot": None,  # 消费掉，防重复落库
+                "current_step": "done",
+            }
+        if result.get("error_code") == "HITL_REJECTED":
+            content = f"❌ 人工审核未通过，预约已取消。审核意见：{result.get('error_message', '')}"
+        elif result.get("error_code") == "SLOT_EXPIRED":
+            content = "很抱歉，您选的时段就诊时间已过，无法预约。请从排班表重新选择其他时段"
+        elif result.get("error_code") == "HITL_UNAVAILABLE":
+            content = "当前无法提交人工审核，预约未生效。请稍后再试或联系工作人员"
+        else:
+            content = f"❌ 预约未成功：{result.get('error_message', '未知错误')}"
+        update = {"messages": [AIMessage(content=content, name="confirmer_agent")]}
+        if result.get("error_code") == "SLOT_EXPIRED":
+            update["selected_slot"] = None
+            update["current_step"] = "schedule"
+        return update
+
+    return confirm_book_node
 
 
 def build_supervisor_app(checkpointer: InMemorySaver | None = None):
@@ -239,6 +300,7 @@ def build_supervisor_app(checkpointer: InMemorySaver | None = None):
     wrapper.add_node("intake_direct", build_intake_node())  # v4：确定性抽取节点（非 ReAct）
     wrapper.add_node("scheduler_direct", build_scheduler_agent())
     wrapper.add_node("confirmer_direct", build_confirmer_agent())
+    wrapper.add_node("confirm_book_direct", build_confirm_book_node())  # v6：确定性落库（UI 直选/对话确认共用）
     wrapper.add_node("knowledge_direct", build_knowledge_agent())
 
     # 4) edges
@@ -250,6 +312,7 @@ def build_supervisor_app(checkpointer: InMemorySaver | None = None):
             "intake_direct": "intake_direct",
             "scheduler_direct": "scheduler_direct",
             "confirmer_direct": "confirmer_direct",
+            "confirm_book_direct": "confirm_book_direct",
             "knowledge_direct": "knowledge_direct",
             "supervisor": "supervisor",
         },
@@ -258,6 +321,7 @@ def build_supervisor_app(checkpointer: InMemorySaver | None = None):
     wrapper.add_edge("intake_direct", END)
     wrapper.add_edge("scheduler_direct", END)
     wrapper.add_edge("confirmer_direct", END)
+    wrapper.add_edge("confirm_book_direct", END)
     wrapper.add_edge("knowledge_direct", END)
 
     # 5) checkpointer：v3 从配置自动选

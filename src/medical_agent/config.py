@@ -33,6 +33,16 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    # 智谱 GLM（主 LLM，OpenAI 兼容接口）
+    glm_api_key: str = Field(default="", description="智谱 GLM API Key")
+    glm_model: str = Field(default="glm-4.6", description="GLM 模型名")
+    glm_base_url: str = Field(
+        default="https://open.bigmodel.cn/api/paas/v4/",
+        description="GLM OpenAI 兼容 base URL",
+    )
+    glm_thinking: bool = Field(default=False, description="是否开启 GLM 深度思考（更慢）")
+    glm_vision_model: str = Field(default="glm-4v-flash", description="GLM 多模态视觉模型")
+
     # DeepSeek
     deepseek_api_key: str = Field(default="", description="DeepSeek API Key")
     deepseek_model: str = Field(default="deepseek-chat", description="默认 deepseek-chat")

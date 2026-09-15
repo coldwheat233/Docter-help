@@ -28,7 +28,7 @@ def query_my_appointments(
     limit: int = 10,
     runtime: Any = None,
 ) -> str:
-    """查询当前患者的预约列表。
+    """查询当前患者的预约列表（含历史记录，按即将就诊在前排序）。
 
     Args:
         status: 过滤状态（pending/confirmed/cancelled/completed/no_show），空=全部
@@ -36,10 +36,17 @@ def query_my_appointments(
         runtime: LangGraph runtime（自动注入）
 
     Returns:
-        JSON 字符串：{patient_id, count, appointments: [...]}
+        JSON 字符串：{patient_id, upcoming_count, history_count, appointments: [...]}
+        每条含 is_upcoming/is_past 标记与就诊日期、时段、医生、科室
     """
+    from datetime import datetime
+
     from medical_agent.db.database import get_db
-    from medical_agent.db.repositories import AppointmentRepository
+    from medical_agent.db.repositories import (
+        AppointmentRepository,
+        DoctorRepository,
+        ScheduleRepository,
+    )
     from medical_agent.progress import emit_progress
 
     emit_progress("🔍 正在查询您的预约记录…")
@@ -62,6 +69,8 @@ def query_my_appointments(
     # 2. 查 DB
     db = get_db()
     repo = AppointmentRepository(db)
+    schedule_repo = ScheduleRepository(db)
+    doctor_repo = DoctorRepository(db)
 
     try:
         appts = repo.list_by_patient(patient_id, status=status or None)
@@ -75,26 +84,65 @@ def query_my_appointments(
             ensure_ascii=False,
         )
 
-    # 3. 整理：只返回展示用字段，过滤内部 ID
-    items = []
-    for a in appts[:limit]:
-        items.append(
-            {
-                "appointment_id": a["id"],
-                "status": a["status"],
-                "doctor_id": a["doctor_id"],  # 内部用
-                "schedule_id": a["schedule_id"],
-                "symptoms": a.get("symptoms", ""),
-                "created_at": a.get("created_at", ""),
-                "confirmed_at": a.get("confirmed_at", ""),
-            }
-        )
+    # 3. 整理：联查排班/医生，算 is_past / is_upcoming
+    now = datetime.now()
+    today_iso = now.date().isoformat()
+    hhmm = now.strftime("%H:%M")
+
+    def _is_past(sched: dict | None) -> bool:
+        """排班时间已过（昨天的号，或今天但 end_time 已到）。"""
+        if not sched:
+            return False
+        d = str(sched.get("schedule_date", ""))
+        if d and d < today_iso:
+            return True
+        if d == today_iso:
+            end = str(sched.get("end_time", ""))[:5]
+            if end and end <= hhmm:
+                return True
+        return False
+
+    upcoming: list[dict[str, Any]] = []
+    history: list[dict[str, Any]] = []
+    for a in appts[: 4 * limit]:  # 上限保护，避免全表联查
+        sched = schedule_repo.get_by_id(a["schedule_id"])
+        doctor = doctor_repo.get_by_id(a["doctor_id"]) or {}
+        past = _is_past(sched)
+        is_upcoming = (not past) and a["status"] in ("pending", "confirmed")
+        item = {
+            "appointment_id": a["id"],
+            "status": a["status"],
+            "is_upcoming": is_upcoming,
+            "is_past": past,
+            "schedule_date": (sched or {}).get("schedule_date", ""),
+            "time_slot": (sched or {}).get("time_slot", ""),
+            "start_time": str((sched or {}).get("start_time", ""))[:5],
+            "end_time": str((sched or {}).get("end_time", ""))[:5],
+            "doctor_name": doctor.get("name", ""),
+            "doctor_title": doctor.get("title", ""),
+            "department": doctor.get("department", ""),
+            "symptoms": a.get("symptoms", ""),
+            "created_at": a.get("created_at", ""),
+            "confirmed_at": a.get("confirmed_at", ""),
+            "cancelled_at": a.get("cancelled_at", ""),
+            "cancelled_reason": a.get("cancelled_reason", ""),
+            # 内部字段：改约/取消流程要用
+            "doctor_id": a["doctor_id"],
+            "schedule_id": a["schedule_id"],
+        }
+        (upcoming if is_upcoming else history).append(item)
+
+    # 即将就诊按时间正排（最近的在最上），历史按时间倒排（最近的过去在前）
+    upcoming.sort(key=lambda x: (x["schedule_date"], x["start_time"]))
+    history.sort(key=lambda x: (x["schedule_date"], x["created_at"]), reverse=True)
+    items = (upcoming + history)[:limit]
 
     return json.dumps(
         {
             "success": True,
             "patient_id": patient_id,
-            "count": len(items),
+            "upcoming_count": len(upcoming),
+            "history_count": len(history),
             "status_filter": status or "all",
             "appointments": items,
         },

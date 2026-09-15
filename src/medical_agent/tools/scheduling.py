@@ -101,6 +101,20 @@ def check_availability(
         end_date=end,
         time_slot=time_slot,
     )
+    if not schedules:
+        # 防循环提示：今天的号源可能已全部过期，引导模型改查未来日期
+        return json.dumps(
+            {
+                "success": True,
+                "count": 0,
+                "hint": (
+                    "该日期范围没有可约号源。注意：过期的时段（含今天已结束的）不会返回——"
+                    "如果查的是今天，请改查明天或以后的日期再试；不要用相同参数重复查询"
+                ),
+                "schedules": [],
+            },
+            ensure_ascii=False,
+        )
     return json.dumps(schedules, ensure_ascii=False, indent=2)
 
 
@@ -132,6 +146,25 @@ def select_slot(
                 "messages": [
                     ToolMessage(
                         content=f"排班 {schedule_id} 不存在，请重新用 check_availability 查询后再让用户选择",
+                        tool_call_id=tool_call_id,
+                    )
+                ]
+            }
+        )
+
+    # 已过期的时段不允许选定（日期已过，或今天但结束时间已到）
+    from medical_agent.tools.appointment import _is_slot_expired
+
+    if _is_slot_expired(schedule):
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=(
+                            f"排班 {schedule_id}（{schedule['schedule_date']} "
+                            f"{schedule['start_time']}-{schedule['end_time']}）就诊时间已过，"
+                            f"不能预约。请用 check_availability 查询未过期的时段并请用户重新选择"
+                        ),
                         tool_call_id=tool_call_id,
                     )
                 ]

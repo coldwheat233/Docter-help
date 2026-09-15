@@ -42,13 +42,37 @@ export interface Appointment {
   id: string
   appointment_id?: string
   status: 'confirmed' | 'pending' | 'cancelled' | 'completed' | 'no_show'
+  /** 后端计算：是否即将就诊（未过期且 pending/confirmed） */
+  is_upcoming?: boolean
+  /** 后端计算：就诊时间是否已过 */
+  is_past?: boolean
   symptoms?: string
   schedule_date?: string
   time_slot?: string
+  start_time?: string
+  end_time?: string
   doctor_name?: string
   doctor_title?: string
   department?: string
+  cancelled_at?: string
+  cancelled_reason?: string
   [k: string]: unknown
+}
+
+/** 排班面板：可约时段（后端只返回未过期 + 有号源的） */
+export interface ScheduleItem {
+  schedule_id: number
+  doctor_id: number
+  schedule_version: number
+  doctor_name: string
+  doctor_title?: string
+  department: string
+  schedule_date: string
+  time_slot: 'morning' | 'afternoon' | 'evening'
+  start_time: string
+  end_time: string
+  remaining: number
+  capacity: number
 }
 
 /** 登录会话 */
@@ -56,6 +80,7 @@ export interface Session {
   token: string
   patientId: string
   name: string
+  role?: 'patient' | 'staff'
 }
 
 export const AGENT_LABELS: Record<string, string> = {
@@ -68,4 +93,5 @@ export const AGENT_LABELS: Record<string, string> = {
   guardrail: '安全护栏',
   emergency: '急诊指引',
   rate_limit: '限流保护',
+  document_agent: '病历资料',
 }
