@@ -1,15 +1,14 @@
 /** 主界面：病历纸聊天区 + 输入栏 */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { sendApproval, streamChat, uploadDocument } from './api'
+import { streamChat, uploadDocument } from './api'
 import AdminConsole from './components/AdminConsole'
-import ApprovalCard from './components/ApprovalCard'
 import LoginView from './components/LoginView'
 import MessageBubble from './components/MessageBubble'
 import ProgressTrail from './components/ProgressTrail'
 import SchedulePanel from './components/SchedulePanel'
 import Sidebar from './components/Sidebar'
-import type { Appointment, ApprovalPayload, ChatMessage, Session } from './types'
+import type { Appointment, ChatMessage, Session } from './types'
 
 const SESSION_KEY = 'medical_session'
 
@@ -35,7 +34,7 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([WELCOME])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [pendingApproval, setPendingApproval] = useState<ApprovalPayload | null>(null)
+  const [awaitingReview, setAwaitingReview] = useState<string | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
   const [progress, setProgress] = useState<string[]>([])
   const [showSchedule, setShowSchedule] = useState(false)
@@ -94,7 +93,7 @@ export default function App() {
     setSession(s)
     setThreadId(null)
     setMessages([WELCOME])
-    setPendingApproval(null)
+    setAwaitingReview(null)
   }, [])
 
   const handleLogout = useCallback(() => {
@@ -102,7 +101,7 @@ export default function App() {
     setSession(null)
     setThreadId(null)
     setMessages([WELCOME])
-    setPendingApproval(null)
+    setAwaitingReview(null)
     setInput('')
   }, [])
 
@@ -110,11 +109,11 @@ export default function App() {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages, pendingApproval, busy, progress])
+  }, [messages, awaitingReview, busy, progress])
 
   const sendText = useCallback(
     async (text: string, threadOverride?: string | null) => {
-      if (!text || busy || !session) return
+      if (!text || busy || awaitingReview || !session) return
       setBusy(true)
       setProgress([])
       setMessages((prev) => [...prev, { role: 'user', content: text }])
@@ -132,7 +131,13 @@ export default function App() {
             setRefreshKey((k) => k + 1) // 有写操作结果 → 刷新预约列表
           }
         },
-        onPendingApproval: (payload) => setPendingApproval(payload),
+        onSubmitted: (detail) => {
+          setAwaitingReview(detail)
+          setMessages((prev) => [
+            ...prev,
+            { role: 'assistant', agent: 'confirmer_agent', content: `📮 ${detail}` },
+          ])
+        },
         onDone: (tid) => {
           setThreadId(tid)
           setBusy(false)
@@ -199,35 +204,10 @@ export default function App() {
     [],
   )
 
-  const handleApprove = useCallback(
-    async (decision: string) => {
-      if (!threadId || busy) return
-      setBusy(true)
-      setPendingApproval(null) // 立即停掉"等待中台审批"轮询，防止与本次自主审批竞态
-      try {
-        const res = await sendApproval(threadId, decision)
-        setPendingApproval(res.pending_approval)
-        // 等印章动画演完再落消息
-        setTimeout(() => {
-          setMessages((prev) => [...prev, ...res.messages.filter((m) => m.role !== 'user')])
-          setRefreshKey((k) => k + 1)
-          setBusy(false)
-        }, 650)
-      } catch (e) {
-        setMessages((prev) => [
-          ...prev,
-          { role: 'assistant', content: `❌ 审批提交失败：${e instanceof Error ? e.message : e}` },
-        ])
-        setBusy(false)
-      }
-    },
-    [threadId, busy],
-  )
-
-  // 实时感知中台审批结果：有挂起审批时轮询线程状态，
-  // 中台核准/驳回后自动渲染结果消息并刷新预约列表（方案 B 患者侧）
+  // 实时感知中台审批结果：提交后轮询线程状态，
+  // 中台核准/驳回后自动渲染结果消息并刷新预约列表（审批单不对患者暴露）
   useEffect(() => {
-    if (!pendingApproval || !threadId || !session) return
+    if (!awaitingReview || !threadId || !session) return
     let stopped = false
     const timer = setInterval(async () => {
       try {
@@ -238,8 +218,7 @@ export default function App() {
         const data = await res.json()
         if (stopped || data.pending_approval) return
         // 中台已处理：以服务端线程真相为准渲染结果
-        setPendingApproval(null)
-        setBusy(false)
+        setAwaitingReview(null)
         setProgress([])
         if (Array.isArray(data.messages)) {
           setMessages((prev) => [prev[0], ...data.messages])
@@ -253,7 +232,7 @@ export default function App() {
       stopped = true
       clearInterval(timer)
     }
-  }, [pendingApproval, threadId, session])
+  }, [awaitingReview, threadId, session])
 
   return (
     <div className="flex h-full">
@@ -296,7 +275,7 @@ export default function App() {
           <div className="flex items-center gap-3">
             <button
               onClick={() => setShowSchedule(true)}
-              disabled={busy || !!pendingApproval}
+              disabled={busy || !!awaitingReview}
               className="cursor-pointer rounded-sm border border-dai/60 px-3 py-1.5 font-serif-sc text-xs font-bold tracking-[0.2em] text-dai-deep transition-colors hover:bg-dai-mist disabled:cursor-not-allowed disabled:opacity-40"
             >
               ▤ 排班表
@@ -315,7 +294,7 @@ export default function App() {
               <MessageBubble key={i} msg={m} index={i} />
             ))}
 
-            {busy && !pendingApproval && progress.length === 0 && (
+            {busy && !awaitingReview && progress.length === 0 && (
               <div className="msg-in flex justify-start">
                 <div className="flex items-center gap-1.5 rounded-sm border border-thread/70 bg-paper-deep/50 px-4 py-3">
                   <span className="think-dot h-1.5 w-1.5 rounded-full bg-dai" />
@@ -325,11 +304,8 @@ export default function App() {
               </div>
             )}
 
-            {progress.length > 0 && !pendingApproval && <ProgressTrail steps={progress} />}
+            {progress.length > 0 && !awaitingReview && <ProgressTrail steps={progress} />}
 
-            {pendingApproval && (
-              <ApprovalCard payload={pendingApproval} onDecide={handleApprove} busy={busy} />
-            )}
           </div>
         </div>
 
@@ -365,7 +341,7 @@ export default function App() {
             />
             <button
               onClick={() => fileInputRef.current?.click()}
-              disabled={busy || uploading || !!pendingApproval}
+              disabled={busy || uploading || !!awaitingReview}
               title="上传检查报告/病历照片（jpg/png/webp ≤5MB）"
               className="cursor-pointer rounded-sm border border-thread px-3 py-2.5 font-serif-sc text-sm text-ink-faint transition-colors hover:border-dai hover:text-dai-deep disabled:cursor-not-allowed disabled:opacity-40"
             >
@@ -380,16 +356,16 @@ export default function App() {
                   handleSend()
                 }
               }}
-              disabled={busy || !!pendingApproval}
+              disabled={busy || !!awaitingReview}
               placeholder={
-                pendingApproval ? '请先处理上方审批单…' : '描述您哪里不舒服…（Enter 发送）'
+                awaitingReview ? '人工审核中，请稍候…' : '描述您哪里不舒服…（Enter 发送）'
               }
               rows={2}
               className="min-w-0 flex-1 resize-none rounded-sm border border-thread bg-paper-deep/30 px-4 py-2.5 text-[14px] leading-relaxed text-ink outline-none transition-colors placeholder:text-ink-faint/60 focus:border-dai disabled:opacity-50"
             />
             <button
               onClick={handleSend}
-              disabled={busy || !!pendingApproval || !input.trim()}
+              disabled={busy || !!awaitingReview || !input.trim()}
               className="cursor-pointer rounded-sm border-2 border-dai px-5 py-2.5 font-serif-sc text-sm font-bold tracking-[0.25em] text-dai transition-all hover:bg-dai hover:text-paper active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
             >
               发送

@@ -232,7 +232,7 @@ def set_appointment(
     # 注意：resume 后工具会从头重跑，上面的校验/re-check 会再执行一次（更安全）
     hitl_payload: dict[str, Any] = {
         "type": "appointment_create",
-        "action": "创建预约（落库）",
+        "action": "创建预约（提交人工审核）",
         "patient_id": patient_id,
         "doctor_id": doctor_id,
         "schedule_id": schedule_id,

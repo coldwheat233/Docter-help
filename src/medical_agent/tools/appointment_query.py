@@ -126,9 +126,6 @@ def query_my_appointments(
             "confirmed_at": a.get("confirmed_at", ""),
             "cancelled_at": a.get("cancelled_at", ""),
             "cancelled_reason": a.get("cancelled_reason", ""),
-            # 内部字段：改约/取消流程要用
-            "doctor_id": a["doctor_id"],
-            "schedule_id": a["schedule_id"],
         }
         (upcoming if is_upcoming else history).append(item)
 
@@ -140,7 +137,7 @@ def query_my_appointments(
     return json.dumps(
         {
             "success": True,
-            "patient_id": patient_id,
+            "count": len(items),
             "upcoming_count": len(upcoming),
             "history_count": len(history),
             "status_filter": status or "all",

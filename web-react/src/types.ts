@@ -14,27 +14,10 @@ export interface ChatMessage {
   }
 }
 
-export interface ApprovalPayload {
-  type?: string
-  action?: string
-  patient_id?: string
-  doctor_id?: number
-  schedule_id?: number
-  appointment_id?: string
-  symptoms?: string
-  duration?: string
-  severity?: string
-  schedule_date?: string
-  time_slot?: string
-  reason?: string
-  ask?: string
-  [k: string]: unknown
-}
-
 export interface ChatResponse {
   thread_id: string
   messages: ChatMessage[]
-  pending_approval: ApprovalPayload | null
+  pending_approval: null
   blocked: boolean
 }
 

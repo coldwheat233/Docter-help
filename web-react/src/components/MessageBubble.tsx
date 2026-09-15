@@ -36,10 +36,7 @@ export default function MessageBubble({ msg, index }: Props) {
           {msg.data?.appointment_id && (
             <span className="font-semibold">预约号 {msg.data.appointment_id} · </span>
           )}
-          {ok ? '操作成功' : (msg.data?.error_message ?? '操作失败')}
-          {msg.data?.error_code && (
-            <span className="ml-1 opacity-60">[{msg.data.error_code}]</span>
-          )}
+          {ok ? '操作成功' : (msg.data?.error_message ?? '操作失败，请稍后重试')}
         </div>
       </div>
     )

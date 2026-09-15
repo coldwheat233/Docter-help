@@ -4,7 +4,7 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![LangGraph 0.3+](https://img.shields.io/badge/langgraph-0.3+-orange.svg)](https://langchain-ai.github.io/langgraph/)
-[![DeepSeek](https://img.shields.io/badge/llm-deepseek--chat-purple.svg)](https://platform.deepseek.com/)
+[![GLM](https://img.shields.io/badge/llm-GLM--4.5--flash-green.svg)](https://open.bigmodel.cn/)
 
 ## 项目简介
 
@@ -15,7 +15,11 @@
 - ✅ **规则前置路由 + LLM Supervisor 兜底**：意图明确走确定性直连节点（0ms、不翻车），意图模糊才交给 LLM 路由
 - ✅ **确定性问诊抽取**：intake 用结构化输出直接写 state，不赌工具调用
 - ✅ **HITL 100% 把门（机制级）**：`interrupt()` 下沉到 set/cancel/reschedule/restore 四个写工具内部，人工 approve 前不产生任何副作用，不依赖 prompt 约定
-- ✅ **SQLite 5 张表**：科室 / 医生 / 排班 / 患者 / 预约
+- ✅ **主 LLM：智谱 GLM**（OpenAI 兼容接口，免费 glm-4.5-flash 起步；GLM 未配置自动回退 DeepSeek）
+- ✅ **排班可视化直选**：患者端排班面板点选号源直约，过期时段全链路拦截（推荐/选定/落库三层校验）
+- ✅ **业务中台实时审批**：写操作审批单只进中台（SSE 实时推送，患者提交 ≈0.5s 可见）；中台核准/驳回后患者端 ≈3s 内自动收到结果，审批单不对患者暴露
+- ✅ **多模态病历**：检查报告拍照上传 → GLM-4V 结构化抽取 → 手机号/身份证自动打码入库
+- ✅ **就诊摘要**：聚合历史预约 + 病历资料生成医生侧摘要（辅助归纳，不下诊断）
 - ✅ **LangSmith 全链路追踪**（配置 LANGSMITH_API_KEY 后启用）
 
 ## 项目结构
@@ -23,17 +27,20 @@
 ```
 medical-appointment-agent/
 ├── src/medical_agent/         # 源代码
-│   ├── agents/                 # 4 个子 Agent
-│   ├── graphs/                 # Supervisor + Swarm 装配
+│   ├── agents/                 # 4 个子 Agent + 确定性 intake 节点
+│   ├── graphs/                 # Supervisor 装配 + 确定性确认落库节点
 │   ├── tools/                  # LangChain @tool 函数
-│   ├── db/                     # 数据库 + Repository
+│   ├── vision.py               # GLM-4V 多模态抽取 + PII 打码
+│   ├── admin_tools.py          # 中台管理函数（排班/医生/统计/审计）
+│   ├── db/                     # 数据库 + Repository（7 张表）
 │   ├── state.py                # State TypedDict
-│   ├── llm.py                  # ChatDeepSeek 工厂
-│   └── main.py                 # 入口
-├── demos/                      # 3 个可跑 demo
+│   ├── llm.py                  # GLM/DeepSeek 统一工厂
+│   └── main.py                 # CLI 入口
+├── web/                        # FastAPI 后端（SSE 流式 + 中台 + REST）
+├── web-react/                  # React 前端（患者端 + 业务中台）
+├── demos/                      # 可跑 demo
 ├── tests/                      # pytest + JSON 用例
-├── docs/                       # 6 份文档
-├── scripts/                    # 一键脚本
+├── scripts/                    # 一键脚本 + e2e 回归脚本
 └── references/                 # 调研参考（不进 git）
 ```
 
@@ -54,8 +61,9 @@ scripts\setup_env.bat
 
 ```bash
 copy .env.example .env
-# 编辑 .env，填入 DEEPSEEK_API_KEY（必须）
-#           和 LANGSMITH_API_KEY（可选）
+# 编辑 .env，填入 GLM_API_KEY（主 LLM，免费模型 glm-4.5-flash 即可跑通）
+#           DEEPSEEK_API_KEY（可选，GLM 未配置时的兜底）
+#           LANGSMITH_API_KEY（可选）
 ```
 
 ### 3. 安装依赖
@@ -96,9 +104,9 @@ python demos/03_medical_appointment_demo.py
 python -m medical_agent.main
 ```
 
-### 6. React 前端（推荐演示入口）
+### 6. Web 界面（推荐演示入口）
 
-「数字病历夹」设计：聊天 = 病历纸，HITL 审批 = 盖章。
+「数字病历夹」设计：聊天 = 病历纸，审核流程 = 中台盖章。
 
 **一键启动（Windows）**：双击 `scripts\run_react_web.bat`（自动起后端+前端+开浏览器）
 
@@ -109,12 +117,42 @@ python -m medical_agent.main
 cd D:\PY_PROJ\NEW\medical-appointment-agent
 D:\miniconda3\envs\python311\python.exe -m uvicorn web.api:app --port 8000
 
-# 终端 2：Vite 前端
+# 终端 2：Vite 前端（开发热更新）
 cd web-react && npm install && npm run dev
 # 打开 http://localhost:5173
 ```
 
 生产模式：`cd web-react && npm run build` 后只起 FastAPI（8000 端口直接托管 dist）。
+
+**双端演示流程**（开两个浏览器页面）：
+
+| 端 | 账号 | 能力 |
+|---|---|---|
+| 患者端 | 注册/登录（如 `glmtest02`） | 聊天问诊预约、排班面板点选号源直约、📎 上传检查报告（GLM-4V 识别）、病历资料/历史预约/就诊摘要、预约卡直接取消/改约 |
+| 业务中台 | `staff / Staff123456` | 审批队列实时推送（SSE）、核准/驳回、排班可视化网格 + 关键词检索 + 图表看板、排班管理、审计日志 |
+
+实时闭环：患者提交申请 ≈0.5s 内推送到中台（SSE）；中台核准/驳回 ≈3s 内患者端自动收到结果（无需刷新）。审批单不对患者暴露，审核权只在中台。
+
+## 主要 API
+
+```
+POST /api/register | /api/login        患者注册/登录（staff 登录返回 role=staff 进入中台）
+POST /api/chat/stream                  SSE 流式对话（进度/消息/提交审核/结果）
+GET  /api/schedules                    未过期排班（患者排班面板）
+POST /api/select-slot                  患者直选号源 → 写入会话 → 对话确认
+GET  /api/appointments                 我的预约（含历史，is_upcoming/is_past 分组）
+POST /api/appointments/{id}/cancel     患者取消自己的预约
+POST /api/appointments/{id}/reschedule 患者改约（乐观锁 + 过期校验）
+POST /api/upload                       上传检查报告（GLM-4V 抽取 + PII 打码）
+GET  /api/documents | /api/summary     病历资料 / 就诊摘要
+GET  /api/threads/{tid}/status         患者轮询审核结果
+GET  /api/admin/approvals[/stream]     中台审批队列（REST / SSE 实时流）
+POST /api/admin/approvals/decision     中台核准/驳回
+GET  /api/admin/stats | /audit         今日统计 / 审计日志
+GET  /api/admin/schedules/view         排班总览（含满员，可视化用）
+POST /api/admin/schedules[/{id}/{op}]  排班创建/停用/恢复/调容量
+GET  /api/metrics                      运行指标（熔断/限流/会话）
+```
 
 ## 命令行用法
 
@@ -136,14 +174,13 @@ python -m medical_agent.main --seed
 ## 运行测试
 
 ```bash
+# 单元测试
 pytest -q
-```
 
-输出：
-```
-tests/test_state.py ....            [ 40%]
-tests/test_repositories.py .....    [100%]
-5 passed
+# 全链路回归（需后端运行在 8000 端口）
+python scripts/e2e_schedule_flow.py   # 排班直选 → 确认 → HITL → 落库
+python scripts/e2e_admin_flow.py      # 患者提交 → 中台审批 → 统计审计
+python scripts/e2e_realtime.py        # SSE 推送 + 患者轮询实时性
 ```
 
 ## 文档导览
@@ -181,18 +218,23 @@ tests/test_repositories.py .....    [100%]
 | langgraph | ≥ 0.3.0 | StateGraph + interrupt |
 | langgraph-supervisor | ≥ 0.0.15 | create_supervisor |
 | langgraph-swarm | ≥ 0.0.14 | create_swarm + handoff |
-| langchain-deepseek | ≥ 0.1.0 | ChatDeepSeek |
+| 智谱 GLM | glm-4.5-flash / glm-4v-flash | 主 LLM（OpenAI 兼容）+ 多模态识别 |
+| langchain-openai | ≥ 0.3 | GLM/DeepSeek 统一接入（function_calling 结构化输出） |
+| langchain-deepseek | ≥ 0.1.0 | ChatDeepSeek（备选主 LLM） |
+| FastAPI | ≥ 0.110 | REST + SSE 流式后端 |
+| React 19 + Vite + Tailwind 4 | — | 患者端 / 业务中台前端 |
 | LangSmith | ≥ 0.2.0 | 可观测（仅环境变量配置） |
-| SQLite | 3 | 数据库 |
+| SQLite | 3 | 数据库（7 张表） |
 
 ## 风险与限制
 
 - **conda 环境名不符**：README 原说装到 `medical-appointment` env，实际依赖装在 `D:\miniconda3\envs\python311`；base 环境缺 `langchain_deepseek`/`langgraph_supervisor`，跑测试请用 python311 env
-- **D 盘空间紧**：conda env 必须装到 C 盘（`miniconda3\envs\medical-appointment`）
-- **Python 3.13 兼容性未明确**：本项目用 3.11
-- **deepseek-reasoner 不支持 tool calling**：必须用 `deepseek-chat`
+- **GLM 余额**：`glm-4.5-flash`/`glm-4v-flash` 免费可用；`glm-4.6` 需账户充值（实测无余额报 code 1113），切换只需改 `.env` 的 `GLM_MODEL`
+- **GLM 不支持 json_schema response_format**：`with_structured_output` 必须用 `method="function_calling"`，否则新版 OpenAI SDK 会把模型文本当增量 JSON 解析报错
 - **Swarm 模式是空壳对比实验**：4 个 Agent 只挂 handoff 工具，无业务工具，不能完成真实预约；演示请用 Supervisor 模式
 - **非图环境写操作默认拦截**：单测/demo 直接调写工具需设 `MEDICAL_HITL_BYPASS=1`
+- **审批不暴露给患者**：患者侧无审批卡、无 `/api/approve`，核准/驳回只能在中台（staff 鉴权）完成
+- **token 存内存**：后端重启后所有登录态失效需重新登录；审批队列扫描基于内存 checkpointer，同理
 
 ## 贡献者
 

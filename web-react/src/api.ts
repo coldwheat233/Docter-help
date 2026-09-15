@@ -1,6 +1,6 @@
 /** API 客户端（对接 web/api.py，dev 走 vite proxy） */
 
-import type { ApprovalPayload, ChatMessage, ChatResponse, Session } from './types'
+import type { ChatMessage, ChatResponse, Session } from './types'
 
 // =====================================================================
 // 认证
@@ -38,10 +38,6 @@ async function post<T>(url: string, body: unknown): Promise<T> {
 
 export function sendChat(message: string, threadId: string | null, token: string): Promise<ChatResponse> {
   return post('/api/chat', { message, thread_id: threadId, token })
-}
-
-export function sendApproval(threadId: string, decision: string): Promise<ChatResponse> {
-  return post('/api/approve', { thread_id: threadId, decision })
 }
 
 export async function fetchAppointments(token: string) {
@@ -139,6 +135,55 @@ export const adminApi = {
     post(`/api/admin/schedules/${scheduleId}/${op}?token=${encodeURIComponent(token)}`, body) as Promise<{ success: boolean; error_message?: string }>,
   createDoctor: (token: string, body: { name: string; department: string; title: string; specialty: string }) =>
     post(`/api/admin/doctors?token=${encodeURIComponent(token)}`, body) as Promise<{ success: boolean; doctor_id?: number; error_message?: string }>,
+  doctors: (token: string) =>
+    get<{ doctors: { id: number; name: string; department: string; title: string }[] }>(
+      `/api/admin/doctors?token=${encodeURIComponent(token)}`,
+    ),
+  schedulesView: (token: string, department: string | null, days = 7) => {
+    const params = new URLSearchParams({ token: encodeURIComponent(token), days: String(days) })
+    if (department) params.set('department', department)
+    return get<{ count: number; schedules: AdminScheduleItem[] }>(
+      `/api/admin/schedules/view?${params.toString()}`,
+    )
+  },
+  searchAppointments: (token: string, q: string, status: string, limit = 100) => {
+    const params = new URLSearchParams({ token: encodeURIComponent(token), limit: String(limit) })
+    if (q.trim()) params.set('q', q.trim())
+    if (status) params.set('status', status)
+    return get<{ count: number; appointments: AdminAppointmentRow[] }>(
+      `/api/admin/appointments/search?${params.toString()}`,
+    )
+  },
+}
+
+export interface AdminScheduleItem {
+  schedule_id: number
+  doctor_id: number
+  doctor_name: string
+  doctor_title?: string
+  department: string
+  schedule_date: string
+  time_slot: string
+  start_time: string
+  end_time: string
+  remaining: number
+  capacity: number
+}
+
+export interface AdminAppointmentRow {
+  id: string
+  status: string
+  symptoms?: string
+  severity?: string
+  created_at: string
+  cancelled_reason?: string
+  patient_name?: string
+  doctor_name: string
+  department: string
+  schedule_date: string
+  time_slot: string
+  start_time: string
+  end_time: string
 }
 
 // =====================================================================
@@ -212,8 +257,8 @@ export interface StreamHandlers {
   onProgress?: (label: string) => void
   /** 最终消息批次 */
   onMessages?: (messages: ChatMessage[]) => void
-  /** HITL 审批点 */
-  onPendingApproval?: (payload: ApprovalPayload) => void
+  /** 申请已提交人工审核（审批在中台进行，患者端不出审批单） */
+  onSubmitted?: (detail: string) => void
   /** 流结束（拿到 thread_id） */
   onDone?: (threadId: string) => void
   onError?: (detail: string) => void
@@ -267,8 +312,8 @@ export async function streamChat(
       case 'messages':
         handlers.onMessages?.(parsed as ChatMessage[])
         break
-      case 'pending_approval':
-        handlers.onPendingApproval?.(parsed as ApprovalPayload)
+      case 'submitted':
+        handlers.onSubmitted?.((parsed as { detail: string }).detail)
         break
       case 'done':
         handlers.onDone?.((parsed as { thread_id: string }).thread_id)
@@ -292,4 +337,3 @@ export async function streamChat(
   if (buffer.trim()) dispatch(buffer)
 }
 
-export type { ApprovalPayload }

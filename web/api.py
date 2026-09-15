@@ -5,7 +5,7 @@
 - SSE 流式：/api/chat/stream 推送进度事件（白名单话术，不透传内部字段）
 - 护栏 / 急诊短路 / 三层限流（IP + 用户 + 全局令牌桶 + 攻击黑名单）
 - 用户体系：register/login 发 token，patient_id 来自登录态而非客户端自报
-- HITL：chat 返回 pending_approval → 前端渲染审批卡 → POST /api/approve resume
+- HITL：写操作在图内 interrupt 暂停 → 中台 /api/admin/approvals/decision resume（患者端不暴露审批单）
 
 启动：
     python web/api.py
@@ -16,7 +16,6 @@
 - POST /api/login        {username, password} → {token, patient_id, name}
 - POST /api/chat         {message, thread_id?, token? | patient_id}
 - POST /api/chat/stream  同上，SSE 流式（progress / messages / pending_approval / done）
-- POST /api/approve      {thread_id, decision}          decision: "approve" | "reject:原因"
 - GET  /api/appointments?patient_id= 或 ?token=
 - GET  /api/appointments/{appointment_id}
 - GET  /api/departments
@@ -325,11 +324,6 @@ class ChatRequest(BaseModel):
     token: str | None = None
 
 
-class ApproveRequest(BaseModel):
-    thread_id: str
-    decision: str  # "approve" | "reject:原因"
-
-
 class ChatResponse(BaseModel):
     thread_id: str
     messages: list[dict[str, Any]]
@@ -384,18 +378,65 @@ def _new_messages(graph_app, thread_id: str, since: int) -> list[dict[str, Any]]
     return out
 
 
-def _pending_approval(graph_app, thread_id: str) -> dict[str, Any] | None:
+def _pending_approval(
+    graph_app, thread_id: str, for_patient: bool = False
+) -> dict[str, Any] | None:
+    """取线程的待审批 payload。for_patient=True 时富化展示字段并剥离内部 ID。"""
     from medical_agent.graphs.hitl import get_pending_interrupt
 
     intr = get_pending_interrupt(graph_app, _config(thread_id))
     if intr is None:
         return None
     payload = getattr(intr, "value", intr)
-    return payload if isinstance(payload, dict) else {"detail": str(payload)}
+    if not isinstance(payload, dict):
+        return {"detail": str(payload)}
+
+    if not for_patient:
+        return payload
+
+    # 患者视图：带人读字段，剥内部 ID
+    from medical_agent.db.database import get_db
+    from medical_agent.db.repositories import DoctorRepository, PatientRepository, ScheduleRepository
+
+    db = get_db()
+    prow = PatientRepository(db).get_by_id(payload.get("patient_id", "")) or {}
+    doctor = DoctorRepository(db).get_by_id(payload.get("doctor_id") or 0) or {}
+    sched = ScheduleRepository(db).get_by_id(payload.get("schedule_id") or 0) or {}
+    clean = {
+        "type": payload.get("type", ""),
+        "action": payload.get("action", ""),
+        "patient_name": prow.get("name", ""),
+        "schedule_date": payload.get("schedule_date") or sched.get("schedule_date", ""),
+        "time_slot": payload.get("time_slot") or sched.get("time_slot", ""),
+        "start_time": str(sched.get("start_time", ""))[:5],
+        "end_time": str(sched.get("end_time", ""))[:5],
+        "department": doctor.get("department", ""),
+        "doctor_name": doctor.get("name", ""),
+        "doctor_title": doctor.get("title", ""),
+        "doctor_line": f"{doctor.get('department', '')} {doctor.get('name', '')} {doctor.get('title', '')}".strip(),
+        "symptoms": payload.get("symptoms", ""),
+        "duration": payload.get("duration", ""),
+        "severity": payload.get("severity", ""),
+        "appointment_id": payload.get("appointment_id", ""),
+        "reason": payload.get("reason", ""),
+        "ask": payload.get("ask", ""),
+    }
+    return {k: v for k, v in clean.items() if v not in (None, "")}
+
+
+_TOOL_RESULT_ALLOWED = {
+    # 患者可见的业务字段白名单；patient_id/doctor_id/schedule_id/version/error_code 等一律不出站
+    "success", "appointment_id", "department", "doctor_name", "doctor_title",
+    "schedule_date", "time_slot", "start_time", "end_time", "status",
+    "symptoms", "count", "upcoming_count", "history_count", "error_message",
+    "cancelled_reason", "is_upcoming", "is_past",
+}
 
 
 def _sanitize_messages(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """输出侧护栏：assistant 消息若泄露系统提示词，替换为统一拒绝话术。"""
+    """输出侧护栏：
+    1. assistant 消息若泄露系统提示词，替换为统一拒绝话术
+    2. tool_result 剥离内部字段（LLM 上下文里的原 JSON 不动，只净化出站副本）"""
     from medical_agent.guardrails import check_output
 
     out = []
@@ -408,6 +449,14 @@ def _sanitize_messages(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "content": "抱歉，我只能协助您处理预约挂号相关的问题。",
                     "leak_blocked": True,
                 }
+        elif m.get("role") == "tool_result":
+            try:
+                data = json.loads(m.get("content", "{}"))
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                clean = {k: v for k, v in data.items() if k in _TOOL_RESULT_ALLOWED}
+                m = {**m, "content": json.dumps(clean, ensure_ascii=False), "data": clean}
         out.append(m)
     return out
 
@@ -490,6 +539,18 @@ def _stream_chat(req: ChatRequest, thread_id: str, patient_id: str):
     # 1) 立即回执（<50ms）——用户立刻知道系统活着
     yield _sse("progress", {"label": "📥 已收到，开始处理…"})
 
+    # 1.5) 该会话有申请正在人工审核中 → 不入图，直接提示等待
+    try:
+        if _pending_approval(graph_app, thread_id, for_patient=True):
+            yield _sse(
+                "messages",
+                [{"role": "assistant", "content": "您有一项申请正在人工审核中，请等待审核结果后再继续。"}],
+            )
+            yield _sse("done", {"thread_id": thread_id})
+            return
+    except Exception:
+        pass
+
     # 2) 路由预告：确定性路由在本地算，0 LLM 成本，直接告诉用户去哪
     last_label = "📥 已收到，开始处理…"
     try:
@@ -532,9 +593,14 @@ def _stream_chat(req: ChatRequest, thread_id: str, patient_id: str):
 
     print(f"[timing] thread={thread_id} total={time.time() - t_start:.1f}s")
     yield _sse("messages", _sanitize_messages(_new_messages(graph_app, thread_id, before)))
-    pending = _pending_approval(graph_app, thread_id)
+    # 审批只在中台进行：患者端不暴露审批单，仅提示"已提交人工审核"，
+    # 结果由前端轮询 /api/threads/{tid}/status 自动送达
+    pending = _pending_approval(graph_app, thread_id, for_patient=True)
     if pending:
-        yield _sse("pending_approval", pending)
+        yield _sse(
+            "submitted",
+            {"detail": pending.get("action") or "您的申请已提交人工审核，结果将自动告知"},
+        )
     yield _sse("done", {"thread_id": thread_id})
 
 
@@ -569,6 +635,12 @@ def chat(req: ChatRequest, request: Request) -> Any:
     from langchain_core.messages import HumanMessage
 
     graph_app = get_graph_app()
+    # 有申请正在人工审核 → 不入图
+    if _pending_approval(graph_app, thread_id, for_patient=True):
+        return ChatResponse(
+            thread_id=thread_id,
+            messages=[{"role": "assistant", "content": "您有一项申请正在人工审核中，请等待审核结果后再继续。"}],
+        )
     before = _msg_count(graph_app, thread_id)
     graph_app.invoke(
         {"messages": [HumanMessage(content=text)], "patient_id": patient_id},
@@ -578,7 +650,7 @@ def chat(req: ChatRequest, request: Request) -> Any:
     return ChatResponse(
         thread_id=thread_id,
         messages=_sanitize_messages(_new_messages(graph_app, thread_id, before)),
-        pending_approval=_pending_approval(graph_app, thread_id),
+        pending_approval=None,  # 审批只在中台，不暴露给患者
     )
 
 
@@ -615,24 +687,8 @@ def chat_stream(req: ChatRequest, request: Request) -> Any:
     )
 
 
-@app.post("/api/approve", response_model=ChatResponse)
-def approve(req: ApproveRequest, request: Request) -> Any:
-    ip = _client_ip(request)
-    for blocked in (_check_ip_allowed(ip), _check_global_allowed()):
-        if blocked:
-            return blocked
-
-    from medical_agent.graphs.hitl import resume_with_decision
-
-    graph_app = get_graph_app()
-    before = _msg_count(graph_app, req.thread_id)
-    resume_with_decision(graph_app, _config(req.thread_id), req.decision)
-
-    return ChatResponse(
-        thread_id=req.thread_id,
-        messages=_sanitize_messages(_new_messages(graph_app, req.thread_id, before)),
-        pending_approval=_pending_approval(graph_app, req.thread_id),
-    )
+# 说明：患者侧 /api/approve 已移除（v6）——审批单不对患者暴露，
+# 核准/驳回统一走中台 /api/admin/approvals/decision（staff 鉴权）。
 
 
 @app.get("/api/appointments")
@@ -728,14 +784,14 @@ def select_slot_api(req: SelectSlotRequest) -> Any:
     }
     thread_id = req.thread_id or f"web-{uuid.uuid4().hex[:12]}"
     graph_app = get_graph_app()
-    # 关键：把选中时段同时写进消息历史 —— confirmer LLM 只能看到 messages，
-    # 只写 selected_slot 它会当没发生过，自己瞎查排班甚至死循环
+    # 写进消息历史：确认走确定性节点（confirm_book_direct）从 state 取参，不依赖 LLM；
+    # 消息患者端可见，必须保持纯服务话术——不带任何内部指令/字段
     from langchain_core.messages import AIMessage
 
     slot_desc = (
-        f"已为患者选定时段：{slot['schedule_date']} {slot['start_time']}-{slot['end_time']} "
-        f"{slot['doctor_name']}（{slot['doctor_title']}，{slot['department']}），"
-        f"患者即将确认，请直接调用 set_appointment() 落库（参数自动从 state 提取）。"
+        f"已为您锁定时段：{slot['schedule_date']} {slot['start_time']}-{slot['end_time']} "
+        f"{slot['department']} {slot['doctor_name']}（{slot['doctor_title']}）。"
+        f"请发送确认消息完成预约。"
     )
     graph_app.update_state(
         _config(thread_id),
@@ -1265,7 +1321,7 @@ def thread_status(thread_id: str, token: str | None = None, since: int = 0) -> A
         return JSONResponse(status_code=403, content={"detail": "无权查看该会话"})
 
     msgs = _sanitize_messages(_new_messages(graph_app, thread_id, max(0, since)))
-    pending = _pending_approval(graph_app, thread_id)
+    pending = _pending_approval(graph_app, thread_id, for_patient=True)
     return {
         "thread_id": thread_id,
         "msg_count": len(values.get("messages", [])),
@@ -1276,7 +1332,7 @@ def thread_status(thread_id: str, token: str | None = None, since: int = 0) -> A
 
 @app.post("/api/admin/approvals/decision")
 def admin_decide(req: AdminDecisionRequest, request: Request, token: str | None = None) -> Any:
-    """中台处理申请：通过 / 驳回（带原因）。等价于患者侧 /api/approve，入口换成 staff。"""
+    """中台处理申请：通过 / 驳回（带原因）。resume 线程内 interrupt，落库并返回结果。"""
     guard = _guard_staff(request, token)
     if guard:
         return guard
@@ -1290,7 +1346,7 @@ def admin_decide(req: AdminDecisionRequest, request: Request, token: str | None 
         "success": True,
         "thread_id": req.thread_id,
         "messages": _sanitize_messages(_new_messages(graph_app, req.thread_id, before)),
-        "pending_approval": _pending_approval(graph_app, req.thread_id),
+        "pending_approval": _pending_approval(graph_app, req.thread_id, for_patient=True),
     }
 
 
@@ -1302,6 +1358,96 @@ def admin_stats(request: Request, token: str | None = None) -> Any:
     from medical_agent.admin_tools import admin_stats_today
 
     return admin_stats_today()
+
+
+@app.get("/api/admin/schedules/view")
+def admin_schedules_view(
+    request: Request, token: str | None = None, days: int = 7, department: str | None = None
+) -> Any:
+    """排班总览（中台可视化用）：含满员号源（remaining=0），只看今天起的前 N 天。"""
+    guard = _guard_staff(request, token)
+    if guard:
+        return guard
+
+    from datetime import date, timedelta
+
+    from medical_agent.db.database import get_db
+    from medical_agent.db.repositories import DepartmentRepository, ScheduleRepository
+
+    days = max(1, min(days, 14))
+    db = get_db()
+    today = date.today()
+    departments = [d["name"] for d in DepartmentRepository(db).list_all()]
+    if department:
+        departments = [department] if department in departments else []
+    repo = ScheduleRepository(db)
+    out: list[dict[str, Any]] = []
+    for dept in departments:
+        out.extend(
+            repo.find_available(
+                department=dept,
+                start_date=today,
+                end_date=today + timedelta(days=days - 1),
+                min_remaining=0,
+                include_past=True,
+            )
+        )
+    out.sort(key=lambda x: (x["schedule_date"], x["start_time"], x["department"], x["doctor_name"]))
+    return {"days": days, "count": len(out), "schedules": out}
+
+
+@app.get("/api/admin/appointments/search")
+def admin_appointments_search(
+    request: Request,
+    token: str | None = None,
+    q: str = "",
+    status: str = "",
+    limit: int = 100,
+) -> Any:
+    """预约检索（中台用）：关键词匹配 预约号/患者/医生/科室/症状/日期，可按状态过滤。"""
+    guard = _guard_staff(request, token)
+    if guard:
+        return guard
+
+    from medical_agent.db.database import get_db
+
+    db = get_db()
+    sql = """
+        SELECT a.id, a.status, a.symptoms, a.severity, a.created_at, a.cancelled_reason,
+               p.name  AS patient_name,
+               d.name  AS doctor_name, d.department,
+               s.schedule_date, s.time_slot, s.start_time, s.end_time
+        FROM appointments a
+        LEFT JOIN patients p ON p.id = a.patient_id
+        JOIN doctors d ON d.id = a.doctor_id
+        JOIN schedules s ON s.id = a.schedule_id
+        WHERE 1=1
+    """
+    params: list[Any] = []
+    if q.strip():
+        like = f"%{q.strip()}%"
+        sql += """ AND (a.id LIKE ? OR a.symptoms LIKE ? OR p.name LIKE ?
+                   OR d.name LIKE ? OR d.department LIKE ? OR s.schedule_date LIKE ?)"""
+        params.extend([like] * 6)
+    if status.strip():
+        sql += " AND a.status = ?"
+        params.append(status.strip())
+    sql += " ORDER BY a.created_at DESC LIMIT ?"
+    params.append(max(1, min(limit, 300)))
+    rows = db.execute(sql, params).fetchall()
+    items = [dict(r) for r in rows]
+    return {"count": len(items), "appointments": items}
+
+
+@app.get("/api/admin/doctors")
+def admin_list_doctors(request: Request, token: str | None = None) -> Any:
+    guard = _guard_staff(request, token)
+    if guard:
+        return guard
+    from medical_agent.db.database import get_db
+    from medical_agent.db.repositories import DoctorRepository
+
+    return {"doctors": DoctorRepository(get_db()).list_all()}
 
 
 @app.get("/api/admin/audit")
